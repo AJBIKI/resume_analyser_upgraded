@@ -14,18 +14,18 @@ interface OpenAIResponse {
 
 export async function callOpenAIApi(
   prompt: string,
-  options: { temperature?: number; max_tokens?: number } = {}
+  options: { temperature?: number; max_tokens?: number; systemPrompt?: string } = {}
 ): Promise<OpenAIResponse> {
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
-        { role: "system", content: "You are an expert resume analyzer." },
+        { role: "system", content: options.systemPrompt || "You are an expert resume analyzer." },
         { role: "user", content: prompt },
       ],
       response_format: { type: "json_object" },
       temperature: options.temperature ?? 0, // Default to 0 for consistency
-      max_tokens: options.max_tokens ?? 1500, // Default to 1500 for sufficient output
+      max_tokens: options.max_tokens ?? 2500, // Increased default to 2500 for larger outputs
     });
 
     const response = completion.choices[0].message.content;

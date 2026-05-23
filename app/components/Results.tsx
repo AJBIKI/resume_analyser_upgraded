@@ -1,133 +1,65 @@
-// // app/components/Results.tsx
-// "use client";
-
-// // Results component to display resume analysis (match score, keywords, ATS issues, etc.) using Tailwind CSS.
-
-// import React from "react";
-
-// interface AnalysisResult {
-//   matchScore: number;
-//   matchingKeywords: string[];
-//   missingKeywords: string[];
-//   atsIssues: string[];
-//   actionVerbFeedback: Array<{ bullet: string; feedback: string }>;
-//   readabilityScore: number;
-//   grammarIssues: string[];
-// }
-
-// interface ResultsProps {
-//   analysis: AnalysisResult;
-// }
-
-// const Results: React.FC<ResultsProps> = ({ analysis }) => {
-//   return (
-//     <div className="max-w-3xl mx-auto p-4">
-//       <h1 className="text-2xl font-bold mb-4">Resume Analysis Results</h1>
-
-//       {/* Match Score */}
-//       <div className="mb-6">
-//         <h2 className="text-xl font-semibold">Job Description Match</h2>
-//         <p className="text-lg">Match Score: <span className="font-bold">{analysis.matchScore}%</span></p>
-//         <div className="mt-2">
-//           <h3 className="text-md font-medium">Matching Keywords:</h3>
-//           <ul className="list-disc pl-5">
-//             {analysis.matchingKeywords.length ? (
-//               analysis.matchingKeywords.map((keyword, index) => (
-//                 <li key={index}>{keyword}</li>
-//               ))
-//             ) : (
-//               <li>No matching keywords found.</li>
-//             )}
-//           </ul>
-//         </div>
-//         <div className="mt-2">
-//           <h3 className="text-md font-medium">Missing Keywords:</h3>
-//           <ul className="list-disc pl-5">
-//             {analysis.missingKeywords.length ? (
-//               analysis.missingKeywords.map((keyword, index) => (
-//                 <li key={index}>{keyword}</li>
-//               ))
-//             ) : (
-//               <li>No missing keywords.</li>
-//             )}
-//           </ul>
-//         </div>
-//       </div>
-
-//       {/* ATS Friendliness */}
-//       <div className="mb-6">
-//         <h2 className="text-xl font-semibold">ATS Friendliness</h2>
-//         {analysis.atsIssues.length ? (
-//           <ul className="list-disc pl-5 text-red-600">
-//             {analysis.atsIssues.map((issue, index) => (
-//               <li key={index}>{issue}</li>
-//             ))}
-//           </ul>
-//         ) : (
-//           <p className="text-green-600">No ATS issues detected.</p>
-//         )}
-//       </div>
-
-//       {/* Action Verb Feedback */}
-//       <div className="mb-6">
-//         <h2 className="text-xl font-semibold">Action Verb Analysis</h2>
-//         {analysis.actionVerbFeedback.length ? (
-//           <ul className="space-y-2">
-//             {analysis.actionVerbFeedback.map((item, index) => (
-//               <li key={index}>
-//                 <p><strong>Bullet:</strong> {item.bullet}</p>
-//                 <p><strong>Feedback:</strong> {item.feedback}</p>
-//               </li>
-//             ))}
-//           </ul>
-//         ) : (
-//           <p>No action verb feedback provided.</p>
-//         )}
-//       </div>
-
-//       {/* Readability and Grammar */}
-//       <div className="mb-6">
-//         <h2 className="text-xl font-semibold">Readability and Professionalism</h2>
-//         <p>Readability Score (Flesch-Kincaid Grade Level): <span className="font-bold">{analysis.readabilityScore.toFixed(1)}</span></p>
-//         <p className="text-sm text-gray-600">Lower scores indicate easier readability (aim for 8-10).</p>
-
-//         <div className="mt-2">
-//           <h3 className="text-md font-medium">Grammar Issues:</h3>
-//           {analysis.grammarIssues.length ? (
-//             <ul className="list-disc pl-5 text-red-600">
-//               {analysis.grammarIssues.map((issue, index) => (
-//                 <li key={index}>
-//                   {typeof issue === 'object' && issue !== null
-//                     ? `${(issue as { issue?: string }).issue || ''} ${(issue as { suggestion?: string }).suggestion ? `- Suggestion: ${(issue as { suggestion?: string }).suggestion}` : ''}`
-//                     : issue}
-//                 </li>
-//               ))}
-//             </ul>
-//           ) : (
-//             <p className="text-green-600">No grammar issues detected.</p>
-//           )}
-//         </div>
-//       </div>
-//     </div>
-//   );
-// };
-
-// export default Results;
-
-
-
-
 import React from "react";
-import { CheckCircle, AlertTriangle, Target, FileText, TrendingUp, Users, Award, Zap } from 'lucide-react';
+import { 
+  CheckCircle, AlertTriangle, Target, FileText, 
+  TrendingUp, Users, Award, Zap, AlertCircle, ChevronRight, 
+  BookOpen, Code, Lightbulb, UserX
+} from 'lucide-react';
 
-interface AnalysisResult {
-  matchScore: number;
-  matchingKeywords: string[];
-  missingKeywords: string[];
-  atsIssues: string[];
-  actionVerbFeedback: Array<{ bullet: string; feedback: string }>;
-  readabilityScore: number;
-  grammarIssues: string[];
+export interface AnalysisResult {
+  overallScore: number;
+  scoreInterpretation: 'strong' | 'moderate' | 'weak';
+  rubricBreakdown: {
+    technicalSkills: { score: number; maxScore: number; rationale: string };
+    yearsOfExperience: { score: number; maxScore: number; rationale: string };
+    education: { score: number; maxScore: number; rationale: string };
+    keywordCoverage: { score: number; maxScore: number; rationale: string };
+    softSkillsAndLeadership: { score: number; maxScore: number; rationale: string };
+  };
+  seniorityMismatch: {
+    detected: boolean;
+    resumeLevel: string;
+    jdLevel: string;
+    message: string | null;
+  };
+  keywordAnalysis: {
+    matchedMustHave: string[];
+    missingMustHave: string[];
+    matchedNiceToHave: string[];
+    missingNiceToHave: string[];
+    unexpectedStrengths: string[];
+  };
+  atsAnalysis: {
+    overallAtsScore: number;
+    sectionFlags: Array<{ section: string; status: string; severity: string; advice: string }>;
+    formattingFlags: string[];
+  };
+  bulletFeedback: Array<{
+    original: string;
+    issue: string;
+    rewritten: string;
+    improvementType: string;
+  }>;
+  grammarAndStyle: {
+    issues: Array<{ text: string; issue: string; suggestion: string }>;
+    toneAssessment: string;
+    readabilityGrade: number;
+    usesFirstPerson: boolean;
+    tenseConsistency: string;
+  };
+  semanticInsights: {
+    strongestSections: string[];
+    weakestSections: string[];
+    meaningGaps: Array<{ area: string; gap: string; suggestion: string }>;
+  };
+  topPriorityActions: Array<{
+    priority: number;
+    action: string;
+    impact: 'high' | 'medium' | 'low';
+    effort: 'high' | 'medium' | 'low';
+  }>;
+  summaryVerdict: string;
+  semanticScore: number;
+  semanticGaps: Array<{ section: string; score: number }>;
 }
 
 interface ResultsProps {
@@ -135,297 +67,289 @@ interface ResultsProps {
 }
 
 const Results: React.FC<ResultsProps> = ({ analysis }) => {
-  // Helper function to get score color
-  const getScoreColor = (score: number) => {
-    if (score >= 80) return 'text-green-600';
-    if (score >= 60) return 'text-yellow-600';
+  const getScoreColor = (score: number, maxScore: number = 100) => {
+    const percentage = (score / maxScore) * 100;
+    if (percentage >= 80) return 'text-green-600';
+    if (percentage >= 60) return 'text-yellow-600';
     return 'text-red-600';
   };
 
-  // Helper function to get score background
-  const getScoreBg = (score: number) => {
-    if (score >= 80) return 'bg-green-50 border-green-200';
-    if (score >= 60) return 'bg-yellow-50 border-yellow-200';
+  const getScoreBg = (score: number, maxScore: number = 100) => {
+    const percentage = (score / maxScore) * 100;
+    if (percentage >= 80) return 'bg-green-50 border-green-200';
+    if (percentage >= 60) return 'bg-yellow-50 border-yellow-200';
     return 'bg-red-50 border-red-200';
   };
 
-  // Helper function to get readability assessment
-  const getReadabilityAssessment = (score: number) => {
-    if (score <= 8) return { label: 'Excellent', color: 'text-green-600', bg: 'bg-green-50' };
-    if (score <= 10) return { label: 'Good', color: 'text-green-600', bg: 'bg-green-50' };
-    if (score <= 12) return { label: 'Acceptable', color: 'text-yellow-600', bg: 'bg-yellow-50' };
-    return { label: 'Complex', color: 'text-red-600', bg: 'bg-red-50' };
+  const getBarColor = (score: number, maxScore: number = 100) => {
+    const percentage = (score / maxScore) * 100;
+    if (percentage >= 80) return 'bg-green-500';
+    if (percentage >= 60) return 'bg-yellow-500';
+    return 'bg-red-500';
   };
 
-  const readabilityAssessment = getReadabilityAssessment(analysis.readabilityScore);
+  const getImpactColor = (impact: string) => {
+    switch(impact) {
+      case 'high': return 'bg-red-100 text-red-800 border-red-200';
+      case 'medium': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'low': return 'bg-blue-100 text-blue-800 border-blue-200';
+      default: return 'bg-gray-100 text-gray-800 border-gray-200';
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50 py-8">
-      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+    <div className="min-h-screen bg-gray-50 dark:bg-black py-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        
         {/* Header */}
-        <div className="text-center mb-12">
+        <div className="text-center mb-10">
           <div className="flex justify-center mb-4">
-            <div className="p-3 bg-blue-500 rounded-full">
+            <div className="p-3 bg-indigo-600 dark:bg-pink-600 dark:shadow-[0_0_20px_rgba(236,72,153,0.6)] rounded-full shadow-lg">
               <FileText className="w-8 h-8 text-white" />
             </div>
           </div>
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">Resume Analysis Results</h1>
-          <p className="text-lg text-gray-600">Comprehensive evaluation of your resume performance</p>
+          <h1 className="text-4xl md:text-5xl font-extrabold bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-pink-400 dark:to-pink-600 bg-clip-text text-transparent mb-3 tracking-tight">Executive Summary</h1>
+          <p className="text-xl text-gray-600 max-w-3xl mx-auto">{analysis.summaryVerdict}</p>
         </div>
 
-        {/* Overall Score Hero Card */}
-        <div className={`mb-8 p-8 rounded-2xl border-2 shadow-lg ${getScoreBg(analysis.matchScore)}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex-1">
-              <div className="flex items-center gap-3 mb-4">
-                <Target className="w-8 h-8 text-blue-600" />
-                <h2 className="text-2xl font-bold text-gray-900">Job Description Match</h2>
-              </div>
-              <p className="text-lg text-gray-700 mb-4">
-                Your resume demonstrates a{' '}
-                <span className="font-semibold">
-                  {analysis.matchScore >= 80 ? 'strong' : analysis.matchScore >= 60 ? 'moderate' : 'weak'}
-                </span>{' '}
-                alignment with the target job description
+        {/* Seniority Mismatch Alert */}
+        {analysis.seniorityMismatch.detected && (
+          <div className="mb-8 p-6 bg-red-50 border-l-4 border-red-500 rounded-r-xl shadow-sm flex items-start gap-4">
+            <UserX className="w-8 h-8 text-red-600 flex-shrink-0 mt-1" />
+            <div>
+              <h3 className="text-lg font-bold text-red-900 mb-1">Seniority Mismatch Detected</h3>
+              <p className="text-red-800">
+                You are applying for a <span className="font-bold">{analysis.seniorityMismatch.jdLevel}</span> role, 
+                but your resume reads as <span className="font-bold">{analysis.seniorityMismatch.resumeLevel}</span>. 
+                {analysis.seniorityMismatch.message}
               </p>
             </div>
-            <div className="text-right">
-              <div className={`text-6xl font-bold mb-2 ${getScoreColor(analysis.matchScore)}`}>
-                {analysis.matchScore}%
+          </div>
+        )}
+
+        {/* Top Priority Actions - HERO SECTION */}
+        <div className="mb-10">
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-6 flex items-center gap-2">
+            <Zap className="w-6 h-6 text-yellow-500 dark:text-pink-500" />
+            Top Priority Actions
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {analysis.topPriorityActions.map((action, idx) => (
+              <div key={idx} className="bg-white dark:bg-zinc-950 rounded-xl p-6 border border-gray-200 dark:border-pink-500/30 shadow-sm hover:shadow-md dark:shadow-[0_0_10px_rgba(236,72,153,0.1)] dark:hover:shadow-[0_0_20px_rgba(236,72,153,0.4)] transition-all relative overflow-hidden group">
+                <div className={`absolute top-0 left-0 w-2 h-full ${action.impact === 'high' ? 'bg-red-500 dark:bg-pink-600' : action.impact === 'medium' ? 'bg-yellow-500 dark:bg-pink-400' : 'bg-blue-500 dark:bg-pink-300'}`} />
+                <div className="flex justify-between items-start mb-3">
+                  <span className="text-sm font-bold text-gray-500 uppercase tracking-wider">Priority #{action.priority}</span>
+                  <span className={`text-xs px-2 py-1 rounded-full border font-semibold ${getImpactColor(action.impact)} dark:bg-transparent dark:text-pink-400 dark:border-pink-500`}>
+                    {action.impact.toUpperCase()} IMPACT
+                  </span>
+                </div>
+                <p className="text-gray-800 dark:text-gray-200 font-medium">{action.action}</p>
+                <div className="mt-4 pt-4 border-t border-gray-100 dark:border-zinc-800">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Effort: {action.effort}</span>
+                </div>
               </div>
-              <div className="w-32 h-3 bg-gray-200 rounded-full overflow-hidden">
-                <div 
-                  className={`h-full transition-all duration-500 ${
-                    analysis.matchScore >= 80 ? 'bg-green-500' : 
-                    analysis.matchScore >= 60 ? 'bg-yellow-500' : 'bg-red-500'
-                  }`}
-                  style={{ width: `${analysis.matchScore}%` }}
-                />
-              </div>
-            </div>
+            ))}
           </div>
         </div>
 
-        {/* Grid Layout for Main Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Scores Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-10">
           
-          {/* Keywords Analysis */}
-          <div className="space-y-6">
-            {/* Matching Keywords */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="bg-green-50 px-6 py-4 border-b border-green-100">
-                <div className="flex items-center gap-3">
-                  <CheckCircle className="w-6 h-6 text-green-600" />
-                  <h3 className="text-lg font-semibold text-green-800">Matching Keywords</h3>
-                  <span className="px-2 py-1 bg-green-100 text-green-700 text-sm font-medium rounded-full">
-                    {analysis.matchingKeywords.length}
-                  </span>
-                </div>
-              </div>
-              <div className="p-6">
-                {analysis.matchingKeywords.length ? (
-                  <div className="flex flex-wrap gap-2">
-                    {analysis.matchingKeywords.map((keyword, index) => (
-                      <span
-                        key={index}
-                        className="px-3 py-1 bg-green-100 text-green-800 rounded-full text-sm font-medium border border-green-200"
-                      >
-                        {keyword}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-gray-500 italic">No matching keywords found.</p>
-                )}
-              </div>
+          {/* Main Overall Score Card */}
+          <div className={`col-span-1 lg:col-span-1 p-8 rounded-2xl border-2 dark:border-pink-500 shadow-lg dark:shadow-[0_0_25px_rgba(236,72,153,0.2)] ${getScoreBg(analysis.overallScore)} dark:bg-black flex flex-col justify-center items-center text-center`}>
+            <Target className="w-12 h-12 text-blue-600 dark:text-pink-500 mb-4" />
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Overall Match Score</h2>
+            <div className={`text-7xl font-extrabold mb-4 ${getScoreColor(analysis.overallScore)} dark:text-pink-500 dark:drop-shadow-[0_0_10px_rgba(236,72,153,0.8)]`}>
+              {analysis.overallScore}<span className="text-3xl text-gray-400 dark:text-zinc-600">%</span>
             </div>
-
-            {/* Missing Keywords */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="bg-red-50 px-6 py-4 border-b border-red-100">
-                <div className="flex items-center gap-3">
-                  <AlertTriangle className="w-6 h-6 text-red-600" />
-                  <h3 className="text-lg font-semibold text-red-800">Missing Keywords</h3>
-                  <span className="px-2 py-1 bg-red-100 text-red-700 text-sm font-medium rounded-full">
-                    {analysis.missingKeywords.length}
-                  </span>
-                </div>
-              </div>
-              <div className="p-6">
-                {analysis.missingKeywords.length ? (
-                  <div className="flex flex-wrap gap-2">
-                    {analysis.missingKeywords.map((keyword, index) => (
-                      <span
-                        key={index}
-                        className="px-3 py-1 bg-red-100 text-red-800 rounded-full text-sm font-medium border border-red-200"
-                      >
-                        {keyword}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-green-600 font-medium">✓ No missing keywords - excellent coverage!</p>
-                )}
-              </div>
-            </div>
+            <p className="text-lg text-gray-700 dark:text-gray-300 font-medium capitalize">
+              {analysis.scoreInterpretation} Alignment
+            </p>
           </div>
 
-          {/* ATS & Technical Analysis */}
-          <div className="space-y-6">
-            {/* ATS Friendliness */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className={`px-6 py-4 border-b ${analysis.atsIssues.length ? 'bg-orange-50 border-orange-100' : 'bg-green-50 border-green-100'}`}>
-                <div className="flex items-center gap-3">
-                  <Users className="w-6 h-6 text-blue-600" />
-                  <h3 className="text-lg font-semibold text-gray-800">ATS Friendliness</h3>
-                  <span className={`px-2 py-1 text-sm font-medium rounded-full ${
-                    analysis.atsIssues.length ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'
-                  }`}>
-                    {analysis.atsIssues.length ? `${analysis.atsIssues.length} Issues` : 'Optimized'}
-                  </span>
-                </div>
-              </div>
-              <div className="p-6">
-                {analysis.atsIssues.length ? (
-                  <div className="space-y-3">
-                    {analysis.atsIssues.map((issue, index) => (
-                      <div key={index} className="flex items-start gap-3 p-3 bg-orange-50 rounded-lg border border-orange-100">
-                        <AlertTriangle className="w-5 h-5 text-orange-500 mt-0.5 flex-shrink-0" />
-                        <p className="text-orange-800 text-sm">{issue}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 text-green-600">
-                    <CheckCircle className="w-5 h-5" />
-                    <p className="font-medium">No ATS issues detected - your resume is ATS-optimized!</p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Readability Score */}
-            <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className={`px-6 py-4 border-b ${readabilityAssessment.bg} border-gray-100`}>
-                <div className="flex items-center gap-3">
-                  <TrendingUp className="w-6 h-6 text-purple-600" />
-                  <h3 className="text-lg font-semibold text-gray-800">Readability & Professionalism</h3>
-                  <span className={`px-2 py-1 text-sm font-medium rounded-full ${readabilityAssessment.bg} ${readabilityAssessment.color} border`}>
-                    {readabilityAssessment.label}
-                  </span>
-                </div>
-              </div>
-              <div className="p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <p className="text-sm text-gray-600 mb-1">Flesch-Kincaid Grade Level</p>
-                    <p className={`text-2xl font-bold ${readabilityAssessment.color}`}>
-                      {analysis.readabilityScore.toFixed(1)}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xs text-gray-500 mb-1">Target: 8-10</p>
-                    <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
+          {/* Rubric Breakdown */}
+          <div className="col-span-1 lg:col-span-2 bg-white dark:bg-zinc-950 p-8 rounded-2xl border border-gray-200 dark:border-pink-500/30 shadow-lg dark:shadow-[0_0_15px_rgba(236,72,153,0.15)]">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-6 flex items-center gap-2">
+              <Award className="w-6 h-6 text-indigo-600 dark:text-pink-500" />
+              Dynamic Scoring Rubric
+            </h2>
+            <div className="space-y-5">
+              {Object.entries(analysis.rubricBreakdown).map(([key, data]) => {
+                const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+                return (
+                  <div key={key}>
+                    <div className="flex justify-between items-end mb-1">
+                      <span className="text-sm font-bold text-gray-700 dark:text-gray-300">{label}</span>
+                      <span className={`text-sm font-bold ${getScoreColor(data.score, data.maxScore)} dark:text-pink-400`}>
+                        {data.score} / {data.maxScore} pts
+                      </span>
+                    </div>
+                    <div className="w-full h-2.5 bg-gray-100 dark:bg-zinc-800 rounded-full overflow-hidden mb-1">
                       <div 
-                        className={`h-full ${
-                          analysis.readabilityScore <= 10 ? 'bg-green-500' : 
-                          analysis.readabilityScore <= 12 ? 'bg-yellow-500' : 'bg-red-500'
-                        }`}
-                        style={{ width: `${Math.min(100, (10 / analysis.readabilityScore) * 100)}%` }}
+                        className={`h-full ${getBarColor(data.score, data.maxScore)} dark:bg-pink-500 dark:shadow-[0_0_10px_rgba(236,72,153,0.8)]`}
+                        style={{ width: `${(data.score / data.maxScore) * 100}%` }}
                       />
                     </div>
+                    <p className="text-xs text-gray-500 italic">{data.rationale}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Semantic & ATS Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
+          
+          {/* Semantic Analysis */}
+          <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden">
+            <div className="bg-indigo-50 dark:bg-pink-950/30 px-6 py-4 border-b border-indigo-100 dark:border-pink-500/20 flex items-center gap-3">
+              <TrendingUp className="w-6 h-6 text-indigo-600 dark:text-pink-500" />
+              <h3 className="text-lg font-bold text-indigo-900 dark:text-pink-400">Semantic Meaning Gaps</h3>
+            </div>
+            <div className="p-6">
+              <div className="mb-6 flex items-center justify-between">
+                <span className="text-gray-700 dark:text-gray-300 font-medium">Overall Semantic Score:</span>
+                <span className={`text-2xl font-bold ${getScoreColor(analysis.semanticScore)} dark:text-pink-500 dark:drop-shadow-[0_0_8px_rgba(236,72,153,0.5)]`}>
+                  {analysis.semanticScore}%
+                </span>
+              </div>
+              
+              {analysis.semanticInsights.meaningGaps.length > 0 ? (
+                <div className="space-y-4">
+                  {analysis.semanticInsights.meaningGaps.map((gap, i) => (
+                    <div key={i} className="p-4 bg-indigo-50 dark:bg-zinc-900 rounded-lg border border-indigo-100 dark:border-zinc-800">
+                      <p className="text-sm font-bold text-indigo-900 dark:text-pink-400 mb-1">{gap.area.toUpperCase()}</p>
+                      <p className="text-sm text-indigo-800 dark:text-gray-300 mb-2"><span className="font-semibold">Gap:</span> {gap.gap}</p>
+                      <p className="text-sm text-indigo-700 dark:text-gray-400"><span className="font-semibold">Fix:</span> {gap.suggestion}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-green-600 font-medium flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5" /> No major semantic gaps detected.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* ATS & Formatting */}
+          <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden">
+            <div className="bg-orange-50 dark:bg-pink-950/30 px-6 py-4 border-b border-orange-100 dark:border-pink-500/20 flex items-center gap-3">
+              <AlertCircle className="w-6 h-6 text-orange-600 dark:text-pink-500" />
+              <h3 className="text-lg font-bold text-orange-900 dark:text-pink-400">ATS & Section Analysis</h3>
+            </div>
+            <div className="p-6 space-y-6">
+              
+              {/* ATS Sections */}
+              <div>
+                <h4 className="text-sm font-bold text-gray-700 dark:text-gray-400 mb-3 uppercase tracking-wider">Required Sections</h4>
+                <div className="space-y-3">
+                  {analysis.atsAnalysis.sectionFlags.map((flag, i) => (
+                    <div key={i} className={`flex items-start gap-3 p-3 rounded-lg border ${
+                      flag.severity === 'critical' ? 'bg-red-50 border-red-200 text-red-800' :
+                      flag.severity === 'warning' ? 'bg-yellow-50 border-yellow-200 text-yellow-800' :
+                      'bg-blue-50 border-blue-200 text-blue-800'
+                    }`}>
+                      {flag.severity === 'critical' ? <AlertTriangle className="w-5 h-5 mt-0.5" /> : <AlertCircle className="w-5 h-5 mt-0.5" />}
+                      <div>
+                        <p className="text-sm font-bold">{flag.section.toUpperCase()} ({flag.status})</p>
+                        <p className="text-sm mt-1">{flag.advice}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        {/* Keywords Comparison */}
+        <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden mb-10">
+          <div className="bg-gray-50 dark:bg-pink-950/30 px-6 py-4 border-b border-gray-200 dark:border-pink-500/20 flex items-center gap-3">
+            <Code className="w-6 h-6 text-gray-700 dark:text-pink-500" />
+            <h3 className="text-lg font-bold text-gray-900 dark:text-pink-400">Keyword Coverage</h3>
+          </div>
+          <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Must Haves */}
+            <div>
+              <h4 className="text-sm font-bold text-gray-700 dark:text-gray-300 mb-3 uppercase tracking-wider">Must-Have Skills</h4>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs font-semibold text-green-600 mb-2">MATCHED ({analysis.keywordAnalysis.matchedMustHave.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.matchedMustHave.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-green-100 text-green-800 rounded text-xs font-medium border border-green-200">{k}</span>
+                    ))}
+                    {analysis.keywordAnalysis.matchedMustHave.length === 0 && <span className="text-sm text-gray-500">None found</span>}
                   </div>
                 </div>
-                <p className="text-sm text-gray-600">
-                  Lower scores indicate easier readability. Aim for 8-10 for professional documents.
-                </p>
+                <div>
+                  <p className="text-xs font-semibold text-red-600 mb-2">MISSING ({analysis.keywordAnalysis.missingMustHave.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.missingMustHave.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-red-100 text-red-800 rounded text-xs font-medium border border-red-200">{k}</span>
+                    ))}
+                    {analysis.keywordAnalysis.missingMustHave.length === 0 && <span className="text-sm text-gray-500">None missing!</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Nice to Haves */}
+            <div>
+              <h4 className="text-sm font-bold text-gray-700 mb-3 uppercase tracking-wider">Nice-to-Have / Bonus Skills</h4>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs font-semibold text-blue-600 mb-2">MATCHED ({analysis.keywordAnalysis.matchedNiceToHave.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.matchedNiceToHave.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium border border-blue-200">{k}</span>
+                    ))}
+                    {analysis.keywordAnalysis.matchedNiceToHave.length === 0 && <span className="text-sm text-gray-500">None found</span>}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 mb-2">UNEXPECTED STRENGTHS (Consider highlighting these)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.unexpectedStrengths.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs font-medium border border-purple-200">{k}</span>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </div>
 
-        {/* Full Width Sections */}
-        <div className="mt-8 space-y-8">
-          {/* Grammar Issues */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className={`px-6 py-4 border-b ${analysis.grammarIssues.length ? 'bg-red-50 border-red-100' : 'bg-green-50 border-green-100'}`}>
-              <div className="flex items-center gap-3">
-                <Award className="w-6 h-6 text-indigo-600" />
-                <h3 className="text-lg font-semibold text-gray-800">Grammar Analysis</h3>
-                <span className={`px-2 py-1 text-sm font-medium rounded-full ${
-                  analysis.grammarIssues.length ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
-                }`}>
-                  {analysis.grammarIssues.length ? `${analysis.grammarIssues.length} Issues` : 'Clean'}
-                </span>
-              </div>
+        {/* Bullet Rewrites */}
+        {analysis.bulletFeedback.length > 0 && (
+          <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden mb-10">
+            <div className="bg-blue-50 dark:bg-pink-950/30 px-6 py-4 border-b border-blue-100 dark:border-pink-500/20 flex items-center gap-3">
+              <Lightbulb className="w-6 h-6 text-blue-600 dark:text-pink-500" />
+              <h3 className="text-lg font-bold text-blue-900 dark:text-pink-400">Experience Bullet Rewrites</h3>
             </div>
-            <div className="p-6">
-              {analysis.grammarIssues.length ? (
-                <div className="space-y-3">
-                  {analysis.grammarIssues.map((issue, index) => (
-                    <div key={index} className="flex items-start gap-3 p-4 bg-red-50 rounded-lg border border-red-100">
-                      <AlertTriangle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
-                      <p className="text-red-800 text-sm">
-                        {typeof issue === 'object' && issue !== null
-                          ? `${(issue as { issue?: string }).issue || ''} ${(issue as { suggestion?: string }).suggestion ? `- Suggestion: ${(issue as { suggestion?: string }).suggestion}` : ''}`
-                          : issue}
-                      </p>
+            <div className="p-6 space-y-6">
+              {analysis.bulletFeedback.map((item, i) => (
+                <div key={i} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-800">
+                    <p className="text-xs font-bold text-gray-500 dark:text-gray-400 mb-2 uppercase">Original ({item.issue})</p>
+                    <p className="text-sm text-gray-700 dark:text-gray-300 italic">"{item.original}"</p>
+                  </div>
+                  <div className="p-4 bg-blue-50 dark:bg-pink-900/20 rounded-lg border border-blue-200 dark:border-pink-500/30 relative">
+                    <div className="hidden md:block absolute -left-3 top-1/2 -translate-y-1/2 w-6 h-6 bg-white dark:bg-black rounded-full border border-gray-200 dark:border-pink-500 flex items-center justify-center">
+                      <ChevronRight className="w-4 h-4 text-blue-500 dark:text-pink-500" />
                     </div>
-                  ))}
+                    <p className="text-xs font-bold text-blue-600 dark:text-pink-400 mb-2 uppercase">Suggested Rewrite</p>
+                    <p className="text-sm text-blue-900 dark:text-pink-200 font-medium">"{item.rewritten}"</p>
+                  </div>
                 </div>
-              ) : (
-                <div className="flex items-center gap-2 text-green-600">
-                  <CheckCircle className="w-5 h-5" />
-                  <p className="font-medium">No grammar issues detected - your writing is clean and professional!</p>
-                </div>
-              )}
+              ))}
             </div>
           </div>
+        )}
 
-          {/* Action Verb Feedback */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-            <div className="bg-blue-50 px-6 py-4 border-b border-blue-100">
-              <div className="flex items-center gap-3">
-                <Zap className="w-6 h-6 text-blue-600" />
-                <h3 className="text-lg font-semibold text-blue-800">Action Verb Analysis</h3>
-                <span className="px-2 py-1 bg-blue-100 text-blue-700 text-sm font-medium rounded-full">
-                  {analysis.actionVerbFeedback.length} {analysis.actionVerbFeedback.length === 1 ? 'Item' : 'Items'}
-                </span>
-              </div>
-            </div>
-            <div className="p-6">
-              {analysis.actionVerbFeedback.length ? (
-                <div className="space-y-4">
-                  {analysis.actionVerbFeedback.map((item, index) => (
-                    <div key={index} className="border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors">
-                      <div className="mb-3">
-                        <p className="text-sm font-medium text-gray-700 mb-1">Original Bullet Point:</p>
-                        <p className="text-gray-900 bg-gray-100 p-2 rounded italic">{item.bullet}</p>
-                      </div>
-                      <div>
-                        <p className="text-sm font-medium text-blue-700 mb-1">💡 Improvement Suggestion:</p>
-                        <p className="text-blue-800">{item.feedback}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-8">
-                  <Zap className="w-12 h-12 text-gray-300 mx-auto mb-3" />
-                  <p className="text-gray-500">No action verb feedback provided.</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="mt-12 text-center">
-          <div className="inline-flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg">
-            <FileText className="w-4 h-4" />
-            <span className="text-sm font-medium">Analysis Complete</span>
-          </div>
-        </div>
       </div>
     </div>
   );
