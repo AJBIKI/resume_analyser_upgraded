@@ -2,9 +2,6 @@
 // Detects embedded images in PDF files using pdfjs-dist (Node.js legacy build).
 // Used to warn users about photos/images that ATS systems cannot parse.
 
-// Use the legacy build for Node.js compatibility (no canvas/worker required)
-import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
-
 /**
  * Count the number of embedded images in a PDF buffer.
  * Temporarily suppresses pdfjs-dist font noise from console output.
@@ -12,6 +9,22 @@ import { getDocument, OPS } from 'pdfjs-dist/legacy/build/pdf.mjs';
  * @returns The number of images found
  */
 export async function countImagesInPDF(buffer: Buffer): Promise<number> {
+  // Mock DOM classes for Vercel Serverless environment BEFORE importing pdfjs-dist
+  if (typeof globalThis !== 'undefined') {
+    if (!globalThis.DOMMatrix) {
+      (globalThis as any).DOMMatrix = class DOMMatrix {};
+    }
+    if (!globalThis.ImageData) {
+      (globalThis as any).ImageData = class ImageData {};
+    }
+    if (!globalThis.Path2D) {
+      (globalThis as any).Path2D = class Path2D {};
+    }
+  }
+
+  // Use dynamic import so polyfills are applied first
+  const { getDocument, OPS } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+
   const data = new Uint8Array(buffer);
 
   // pdfjs-dist's internal warn() uses console.log("Warning: ...") not console.warn
