@@ -19,8 +19,7 @@ const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
 
 // Next.js will be running on 3000 locally, or a Vercel domain in production
-const allowedOrigins = [process.env.FRONTEND_URL || 'http://localhost:3000', 'http://localhost:3000'];
-app.use(cors({ origin: allowedOrigins }));
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
 const httpServer = createServer(app);
@@ -28,7 +27,7 @@ const httpServer = createServer(app);
 // Setup Socket.io
 export const io = new Server(httpServer, {
   cors: {
-    origin: allowedOrigins,
+    origin: '*',
     methods: ['GET', 'POST'],
   },
 });
