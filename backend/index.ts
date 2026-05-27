@@ -8,8 +8,6 @@ import path from 'path';
 // Load environment variables from Next.js .env file
 dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 
-// Import the BullMQ worker
-import './worker';
 import { initializeQdrant } from './lib/qdrant';
 import { verifyToken } from '@clerk/backend';
 import { Job } from 'bullmq';
@@ -86,4 +84,7 @@ httpServer.listen(port, async () => {
   console.log(`[Express] Server running on port ${port}`);
   console.log(`[Socket.io] WebSocket server listening on port ${port}`);
   await initializeQdrant();
+
+  // Import the BullMQ worker strictly AFTER io is exported and server is running
+  require('./worker');
 });
