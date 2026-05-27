@@ -2,12 +2,13 @@
 
 import React, { useState, useRef, useEffect } from "react";
 import { Upload, FileText, Briefcase, Zap, CheckCircle, AlertCircle, Loader2, Target, User, LogOut, History, FileUp } from 'lucide-react';
-import { useUser, SignInButton, SignOutButton } from '@clerk/nextjs';
+import { useUser, useAuth, SignInButton, SignOutButton } from '@clerk/nextjs';
 import Link from 'next/link';
 import { io } from 'socket.io-client';
 
 const ResumeForm: React.FC = () => {
   const { isSignedIn, user, isLoaded } = useUser();
+  const { getToken } = useAuth();
   const [resumeFile, setResumeFile] = useState<File | null>(null);
   const [jobDescription, setJobDescription] = useState("");
   const [error, setError] = useState("");
@@ -17,6 +18,16 @@ const ResumeForm: React.FC = () => {
   const [extractingJD, setExtractingJD] = useState(false);
   const resumeInputRef = useRef<HTMLInputElement>(null);
   const jdInputRef = useRef<HTMLInputElement>(null);
+  const socketRef = useRef<any>(null);
+
+  // Clean up socket connection on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
 
   // Reset file inputs on mount (fixes stale state after browser back navigation)
   useEffect(() => {
@@ -86,11 +97,23 @@ const ResumeForm: React.FC = () => {
 
       if (!jobId) throw new Error("No job ID received");
 
+      // Grab the Clerk JWT token for secure socket connection
+      const token = await getToken();
+
       // Connect to the Express Socket.io server
-      const socket = io('http://localhost:3001');
+      const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001', {
+        auth: { token }
+      });
+      socketRef.current = socket;
 
       socket.on('connect', () => {
         socket.emit('joinJobRoom', jobId);
+      });
+
+      socket.on('connect_error', (err) => {
+        setError(`Connection failed: ${err.message}. Ensure backend is running.`);
+        setIsLoading(false);
+        socket.disconnect();
       });
 
       socket.on('progress', (data) => {
@@ -101,7 +124,8 @@ const ResumeForm: React.FC = () => {
         if (result.analysisId) {
           window.location.href = `/results?id=${result.analysisId}`;
         } else {
-          window.location.href = `/results?data=${encodeURIComponent(JSON.stringify(result.analysisResult))}`;
+          setError("Failed to save analysis to database. Please try again.");
+          setIsLoading(false);
         }
         socket.disconnect();
       });

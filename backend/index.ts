@@ -11,6 +11,9 @@ dotenv.config({ path: path.resolve(process.cwd(), '.env') });
 // Import the BullMQ worker
 import './worker';
 import { initializeQdrant } from './lib/qdrant';
+import { verifyToken } from '@clerk/backend';
+import { Job } from 'bullmq';
+import { analyzeQueue } from '../app/lib/redis';
 
 const app = express();
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
@@ -29,13 +32,49 @@ export const io = new Server(httpServer, {
   },
 });
 
-io.on('connection', (socket) => {
-  console.log(`[Socket.io] Client connected: ${socket.id}`);
+// Authentication Middleware (Guard A & B)
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) {
+    return next(new Error('Authentication error: Missing token'));
+  }
 
-  // Clients join a room based on the jobId they want to track
-  socket.on('joinJobRoom', (jobId: string) => {
-    socket.join(jobId);
-    console.log(`[Socket.io] Socket ${socket.id} joined room: ${jobId}`);
+  try {
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY,
+    });
+    // payload.sub is the user ID
+    socket.data.userId = payload.sub;
+    next();
+  } catch (err) {
+    console.error('[Socket.io] Authentication failed:', err);
+    return next(new Error('Authentication error: Invalid token'));
+  }
+});
+
+io.on('connection', (socket) => {
+  console.log(`[Socket.io] Client connected: ${socket.id} (User: ${socket.data.userId})`);
+
+  // Clients join a room based on the jobId they want to track (Guard C)
+  socket.on('joinJobRoom', async (jobId: string) => {
+    try {
+      const job = await Job.fromId(analyzeQueue, jobId);
+      if (!job) {
+        socket.emit('error', { message: 'Job not found' });
+        return;
+      }
+
+      // Verify owner
+      if (job.data.clerkUserId === socket.data.userId) {
+        socket.join(jobId);
+        console.log(`[Socket.io] Socket ${socket.id} joined room: ${jobId}`);
+      } else {
+        socket.emit('error', { message: 'Unauthorized room access' });
+        console.warn(`[Socket.io] Unauthorized room join attempt by user ${socket.data.userId} for job ${jobId}`);
+      }
+    } catch (err) {
+      console.error(`[Socket.io] Error joining room:`, err);
+    }
   });
 
   socket.on('disconnect', () => {

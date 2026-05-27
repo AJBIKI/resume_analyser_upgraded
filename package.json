@@ -15,6 +15,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@clerk/backend": "^3.4.13",
     "@clerk/express": "^2.1.20",
     "@clerk/nextjs": "^6.28.1",
     "@huggingface/inference": "^4.13.18",

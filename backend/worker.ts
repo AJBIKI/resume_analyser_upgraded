@@ -293,4 +293,7 @@ export const worker = new Worker<AnalyzeJobData>(
 
 worker.on('failed', (job, err) => {
   console.error(`[Worker] Job ${job?.id} failed with error:`, err);
+  if (job?.id) {
+    io.to(job.id).emit('error', { message: 'Analysis failed on the server. Please try again.' });
+  }
 });
