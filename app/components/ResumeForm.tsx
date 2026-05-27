@@ -100,8 +100,12 @@ const ResumeForm: React.FC = () => {
       // Grab the Clerk JWT token for secure socket connection
       const token = await getToken();
 
+      // Clean the URL to prevent double slashes (e.g. .com//socket.io/)
+      const rawSocketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
+      const cleanSocketUrl = rawSocketUrl.replace(/\/$/, '');
+
       // Connect to the Express Socket.io server
-      const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001', {
+      const socket = io(cleanSocketUrl, {
         auth: { token }
       });
       socketRef.current = socket;
