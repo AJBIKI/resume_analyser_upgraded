@@ -69,7 +69,7 @@ resume-analyzer_upgraded/
 │   ├── lib/
 │   │   ├── mongodb.ts            # Singleton MongoClient connection. Lazy-initialized.
 │   │   ├── openai-api.ts         # Wrapper around OpenAI SDK. Always uses gpt-4o + JSON mode.
-│   │   ├── pdf-image-detector.ts # Uses pdfjs-dist to count embedded XObject images in PDF.
+│   │   ├── pdf-image-detector.ts # Counts embedded XObject images in PDF. Uses dynamic import + DOM polyfills (DOMMatrix, ImageData, Path2D) for Vercel serverless compatibility.
 │   │   ├── pdf-parser.ts         # Wraps pdf-parse/lib/pdf-parse.js directly (avoids debug-mode ENOENT bug).
 │   │   └── redis.ts              # ioredis connection + BullMQ Queue export (analyzeQueue).
 │   │
@@ -82,8 +82,8 @@ resume-analyzer_upgraded/
 │   └── page.tsx                  # / — Renders ResumeForm.
 │
 ├── backend/                      # Persistent Node.js server (runs on Render/Railway/EC2)
-│   ├── index.ts                  # Express + Socket.io server. Exports `io`. Initializes Qdrant on boot.
-│   ├── worker.ts                 # BullMQ Worker. Runs the 6-stage pipeline per job.
+│   ├── index.ts                  # Express + Socket.io server. Exports `io`. Implements 3-guard Socket.io auth (token verify, job ownership check). Qdrant init + worker loaded after server starts.
+│   ├── worker.ts                 # BullMQ Worker. Runs the 6-stage pipeline per job. Failed jobs now emit 'error' event to client room.
 │   └── lib/
 │       ├── embeddings.ts         # HuggingFace Inference API wrapper. Generates 384-dim vectors.
 │       ├── qdrant.ts             # QdrantClient config. Collection creation and index initialization.
@@ -110,6 +110,7 @@ resume-analyzer_upgraded/
 | `next` | 15.4.8 | Frontend framework (App Router) |
 | `react` / `react-dom` | 19.1.0 | UI library |
 | `@clerk/nextjs` | ^6.28.1 | Authentication (frontend SSR) |
+| `@clerk/backend` | ^3.4.13 | `verifyToken()` for Socket.io JWT auth (backend) |
 | `@clerk/express` | ^2.1.20 | Authentication (backend Express) |
 | `openai` | ^5.11.0 | OpenAI SDK (gpt-4o, JSON mode) |
 | `@huggingface/inference` | ^4.13.18 | HF API for `all-MiniLM-L6-v2` embeddings |
@@ -717,20 +718,37 @@ export const analyzeQueue = new Queue('analyze-resume', {
 2. API route parses PDF, pushes job to BullMQ:
       const job = await analyzeQueue.add('analyze', { ... });
       return { jobId: job.id };
-3. Client receives jobId, opens Socket.io connection to ws://SOCKET_SERVER_URL:
-      const socket = io('http://localhost:3001');
-4. Client emits join:
+3. Client fetches Clerk JWT: const token = await getToken();
+4. Client opens authenticated Socket.io connection:
+      const socket = io(process.env.NEXT_PUBLIC_SOCKET_URL, { auth: { token } });
+      socketRef.current = socket; // stored in ref for cleanup on unmount
+5. Server middleware (Guard A): io.use(async (socket, next) => {
+      const payload = await verifyToken(token, { secretKey: CLERK_SECRET_KEY });
+      socket.data.userId = payload.sub; // user ID attached to socket
+      next();
+   })
+6. Client emits join on connect:
       socket.on('connect', () => socket.emit('joinJobRoom', jobId));
-5. Server joins socket to room:
-      socket.on('joinJobRoom', (jobId) => socket.join(jobId));
-6. Worker picks up job, executes pipeline, emitting per stage:
+7. Server Guard B+C: Looks up job in BullMQ, verifies job.data.clerkUserId === socket.data.userId:
+      if (authorized) socket.join(jobId);
+      else socket.emit('error', { message: 'Unauthorized room access' });
+8. Worker picks up job, executes pipeline, emitting per stage:
       io.to(job.id!).emit('progress', { step: '...', percent: N });
-7. Worker completes, emits:
+9. Worker completes, emits:
       io.to(job.id!).emit('completed', { analysisId, analysisResult });
-8. Client receives 'completed':
-      socket.disconnect();
-      window.location.href = `/results?id=${analysisId}`;
+10. Client receives 'completed': redirect to /results?id=...
+    (Note: if analysisId is missing, shows error instead of falling back to ?data= URL)
 ```
+
+### Socket.io Authentication — 3-Guard Model
+
+| Guard | Where | What it checks |
+|-------|-------|---------------|
+| **Guard A** — Token verification | `io.use()` middleware | `verifyToken(token, { secretKey })` via `@clerk/backend`. Rejects connection if missing/invalid. |
+| **Guard B** — Job existence | `joinJobRoom` handler | `Job.fromId(analyzeQueue, jobId)` — emits `error` if job not found. |
+| **Guard C** — Job ownership | `joinJobRoom` handler | `job.data.clerkUserId === socket.data.userId` — emits `error` and logs warn if mismatch. |
+
+This means a logged-in user **cannot** spy on another user's analysis progress, even if they know the `jobId`.
 
 ### Socket.io Events Reference
 
@@ -832,24 +850,33 @@ Accepts a PDF or DOCX file, extracts raw text, and returns it. Used by `ResumeFo
 
 The main page component. Manages all form state and the Socket.io lifecycle.
 
-**Key state:**
+**Key state & refs:**
 - `resumeFile` — the selected PDF
 - `jobDescription` — textarea content
 - `jdFile` — the uploaded JD file (after extraction, text goes to `jobDescription`)
 - `isLoading` / `progress` — controls the progress bar UI
 - `extractingJD` — spinner state during `/api/extract-text` call
+- `socketRef` (`useRef`) — holds the active socket instance; cleaned up on component unmount via `useEffect` return
+
+**Clerk hooks used:**
+- `useUser()` → `isSignedIn`, `user`, `isLoaded`
+- `useAuth()` → `getToken()` — fetches the current Clerk JWT session token before opening the socket
 
 **Socket.io lifecycle (inside `handleSubmit`):**
 ```
 POST /api/analyze → receive jobId
-→ io('http://localhost:3001')
+→ const token = await getToken()  // Clerk JWT
+→ const cleanSocketUrl = (NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001').replace(/\/$/, '')
+→ io(cleanSocketUrl, { auth: { token } })  // authenticated connection
+→ socketRef.current = socket
 → on('connect'): emit('joinJobRoom', jobId)
+→ on('connect_error'): show error, stop loading, disconnect
 → on('progress'): update progress bar
-→ on('completed'): redirect to /results?id=...
+→ on('completed'): redirect to /results?id=... (or show error if no analysisId)
 → on('error'): display error, stop loading
 ```
 
-> **Critical note:** The socket URL is hardcoded to `http://localhost:3001` in development. In production, this must be `NEXT_PUBLIC_SOCKET_URL`. This is a **known tech debt item** — see [Section 17](#17-known-bugs-risks--mitigations).
+> **Resolved:** The socket URL previously hardcoded to `localhost:3001` is now read from `NEXT_PUBLIC_SOCKET_URL` with a local fallback. The trailing-slash stripping (`replace(/\/$/, '')`) prevents `//socket.io/` double-slash bugs in Vercel deployments.
 
 ---
 
@@ -931,7 +958,7 @@ export default clerkMiddleware(async (auth, req) => {
 | `REDIS_URL` | ✅ | `app/lib/redis.ts` | Redis connection string (**must use `rediss://` for Upstash TLS**) |
 | `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | ✅ | Clerk SDK | Clerk publishable key |
 | `CLERK_SECRET_KEY` | ✅ | Clerk SDK | Clerk secret key |
-| `NEXT_PUBLIC_SOCKET_URL` | ⚠️ | `ResumeForm.tsx` (not yet used) | WebSocket server URL for production |
+| `NEXT_PUBLIC_SOCKET_URL` | ✅ Prod | `ResumeForm.tsx` | WebSocket server URL (e.g. `https://xyz.onrender.com`). Falls back to `http://localhost:3001` in dev. Trailing slash is stripped automatically. |
 | `PORT` | Optional | `backend/index.ts` | Backend server port (defaults to `3001`) |
 | `FRONTEND_URL` | ⚠️ Prod | `backend/index.ts` CORS | Vercel deployment URL for CORS allow-list |
 
@@ -1069,7 +1096,7 @@ services:
 | # | Severity | Issue | Root Cause | Mitigation |
 |---|----------|-------|-----------|------------|
 | **B1** | 🔴 Critical | `REDIS_URL` uses `redis://` instead of `rediss://` | `ioredis` connects but TLS handshake fails silently | Validate env var prefix on startup; throw if not `rediss://` |
-| **B2** | 🔴 Critical | Socket URL hardcoded to `localhost:3001` in `ResumeForm.tsx` | `const socket = io('http://localhost:3001')` — no env var lookup | Replace with `process.env.NEXT_PUBLIC_SOCKET_URL` |
+| **B2** | ✅ **FIXED** | ~~Socket URL hardcoded to `localhost:3001`~~ | Fixed in `ResumeForm.tsx`: now reads `NEXT_PUBLIC_SOCKET_URL` with local fallback; strips trailing slashes. | — |
 | **B3** | 🟠 High | Qdrant points never cleaned up post-analysis | No TTL or delete call after Stage 5 search | Add `qdrantClient.delete(COLLECTION_NAME, { filter: { must: [{ key: 'jobId', match: { value: job.id } }] } })` after Stage 6 |
 | **B4** | 🟠 High | MongoDB client not singleton in serverless context | New `MongoClient` created per cold start | Add connection pooling guard; reuse across invocations (already partially done via module-level `let client`) |
 | **B5** | 🟡 Medium | `AnalysisResult` interface duplicated in 3 files | Defined in `Results.tsx`, `route.ts` (legacy), and `history/page.tsx` uses its own `AnalysisSummary` | Extract to `app/types/analysis.ts` and import everywhere |
@@ -1077,7 +1104,8 @@ services:
 | **B7** | 🟡 Medium | Render free tier cold starts | Process sleeps after 15 min inactivity | Upgrade to Render Starter plan ($7/mo) or add a keep-alive ping |
 | **B8** | 🟢 Low | `max_tokens: 2500` may truncate master analysis | `gpt-4o` JSON output can be large for resumes with many bullets | Increase to `4096` or stream the response |
 | **B9** | 🟢 Low | No retry logic on HuggingFace embedding calls | Rate limits return 429 silently; Stage 5 fails | Wrap `generateEmbedding()` in exponential backoff |
-| **B10** | 🟢 Low | `pdf-parse` is imported from internal path | `import pdfParse from 'pdf-parse/lib/pdf-parse.js'` bypasses the package index to avoid ENOENT debug mode bug | Document this as intentional; add comment to deter "fixing" it |
+| **B10** | ✅ **FIXED** | ~~`pdf-parse` internal path import~~ | Still intentional — but `pdf-image-detector.ts` upgraded: now uses dynamic `await import()` + polyfills `DOMMatrix`, `ImageData`, `Path2D` on `globalThis` before load. Fixes Vercel serverless crash. | — |
+| **B11** | ✅ **FIXED** | ~~Socket.io had no authentication~~ | `backend/index.ts` now runs `verifyToken()` via `@clerk/backend` as an `io.use()` middleware. Connections without a valid Clerk JWT are rejected. Job ownership is verified before joining a room. | — |
 
 ---
 
@@ -1116,5 +1144,5 @@ Frontend: new `/org/:orgId/dashboard` page showing:
 
 ---
 
-*Document version: 2.0 — Re-engineered May 2026*
+*Document version: 2.1 — Re-engineered May 23 2026 · Patched May 27 2026 (Socket.io auth hardening, ResumeForm JWT, pdf-image-detector serverless fix)*
 *Derived from full source code audit. Update this file whenever worker.ts, prompts.ts, or any schema changes.*

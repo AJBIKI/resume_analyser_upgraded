@@ -1,0 +1,4122 @@
+## User
+
+check out [@DEVELOPER.md](file:///C:/code/30day_challange/AI/resume-analyzer_upgraded/DEVELOPER.md)  [@README.md](file:///C:/code/30day_challange/AI/resume-analyzer_upgraded/README.md)
+
+## Assistant
+
+Let me explore the project structure to get a comprehensive understanding of the codebase.
+
+**Tool Call: List the `resume-analyzer_upgraded` directory's contents**
+Status: Completed
+
+# Folders:
+resume-analyzer_upgraded\.clerk
+resume-analyzer_upgraded\.next
+resume-analyzer_upgraded\.offline-markdown-preview
+resume-analyzer_upgraded\app
+resume-analyzer_upgraded\backend
+resume-analyzer_upgraded\dist-server
+resume-analyzer_upgraded\node_modules
+resume-analyzer_upgraded\public
+
+# Files:
+resume-analyzer_upgraded\.gitignore
+resume-analyzer_upgraded\DEVELOPER.md
+resume-analyzer_upgraded\PORTFOLIO2.md
+resume-analyzer_upgraded\README.md
+resume-analyzer_upgraded\docker-compose.yml
+resume-analyzer_upgraded\eslint.config.mjs
+resume-analyzer_upgraded\middleware.ts
+resume-analyzer_upgraded\next-env.d.ts
+resume-analyzer_upgraded\next.config.js
+resume-analyzer_upgraded\package-lock.json
+resume-analyzer_upgraded\package.json
+resume-analyzer_upgraded\postcss.config.mjs
+resume-analyzer_upgraded\render.yaml
+resume-analyzer_upgraded\resume-sample-2.pdf
+resume-analyzer_upgraded\tsconfig.json
+resume-analyzer_upgraded\tsconfig.server.json
+
+
+**Tool Call: List the `resume-analyzer_upgraded/app` directory's contents**
+Status: Completed
+
+# Folders:
+resume-analyzer_upgraded\app\api
+resume-analyzer_upgraded\app\components
+resume-analyzer_upgraded\app\history
+resume-analyzer_upgraded\app\lib
+resume-analyzer_upgraded\app\results
+
+# Files:
+resume-analyzer_upgraded\app\favicon.ico
+resume-analyzer_upgraded\app\globals.css
+resume-analyzer_upgraded\app\layout.tsx
+resume-analyzer_upgraded\app\page.tsx
+
+
+**Tool Call: List the `resume-analyzer_upgraded/backend` directory's contents**
+Status: Completed
+
+# Folders:
+resume-analyzer_upgraded\backend\lib
+
+# Files:
+resume-analyzer_upgraded\backend\index.ts
+resume-analyzer_upgraded\backend\worker.ts
+
+
+**Tool Call: List the `resume-analyzer_upgraded/app/api` directory's contents**
+Status: Completed
+
+# Folders:
+resume-analyzer_upgraded\app\api\analysis
+resume-analyzer_upgraded\app\api\analyze
+resume-analyzer_upgraded\app\api\extract-text
+resume-analyzer_upgraded\app\api\history
+
+
+**Tool Call: List the `resume-analyzer_upgraded/app/components` directory's contents**
+Status: Completed
+
+
+# Files:
+resume-analyzer_upgraded\app\components\Navbar.tsx
+resume-analyzer_upgraded\app\components\Results.tsx
+resume-analyzer_upgraded\app\components\ResumeForm.tsx
+resume-analyzer_upgraded\app\components\ThemeProvider.tsx
+resume-analyzer_upgraded\app\components\ThemeToggle.tsx
+
+
+**Tool Call: List the `resume-analyzer_upgraded/app/lib` directory's contents**
+Status: Completed
+
+
+# Files:
+resume-analyzer_upgraded\app\lib\mongodb.ts
+resume-analyzer_upgraded\app\lib\openai-api.ts
+resume-analyzer_upgraded\app\lib\pdf-image-detector.ts
+resume-analyzer_upgraded\app\lib\pdf-parser.ts
+resume-analyzer_upgraded\app\lib\redis.ts
+
+
+**Tool Call: List the `resume-analyzer_upgraded/backend/lib` directory's contents**
+Status: Completed
+
+
+# Files:
+resume-analyzer_upgraded\backend\lib\embeddings.ts
+resume-analyzer_upgraded\backend\lib\prompts.ts
+resume-analyzer_upgraded\backend\lib\qdrant.ts
+
+
+**Tool Call: Read file `backend\worker.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/worker.ts
+import { Worker, Job } from 'bullmq';
+import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
+import { redisConnection } from '../app/lib/redis';
+import { callOpenAIApi } from '../app/lib/openai-api';
+import { getDb } from '../app/lib/mongodb';
+import { generateEmbedding } from './lib/embeddings';
+import { qdrantClient, COLLECTION_NAME } from './lib/qdrant';
+import { io } from './index';
+import { 
+  JD_INTEL_SYSTEM_PROMPT, JD_INTEL_USER_PROMPT, 
+  RESUME_MAP_SYSTEM_PROMPT, RESUME_MAP_USER_PROMPT,
+  MASTER_ANALYSIS_SYSTEM_PROMPT, MASTER_ANALYSIS_USER_PROMPT 
+} from './lib/prompts';
+
+interface AnalyzeJobData {
+  resumeText: string;
+  jobDescription: string;
+  clerkUserId: string;
+  resumeFilename: string;
+  atsIssues: string[]; // (Legacy, now handled by Stage 3)
+}
+
+function cleanText(text: string): string {
+  let cleaned = text;
+  // Replace Unicode ligatures
+  cleaned = cleaned.replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl').replace(/ﬀ/g, 'ff');
+  // Strip soft hyphens
+  cleaned = cleaned.replace(/\u00AD/g, '');
+  // Normalize bullets
+  cleaned = cleaned.replace(/[•▪◦–*]/g, '-');
+  // Normalize whitespace (tabs to spaces)
+  cleaned = cleaned.replace(/\t/g, ' ');
+  // Collapse >2 newlines to 2 newlines
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim();
+}
+
+export const worker = new Worker<AnalyzeJobData>(
+  'analyze-resume',
+  async (job: Job) => {
+    console.log(`[Worker] Started processing job: ${job.id}`);
+    
+    const {
+      resumeText,
+      jobDescription,
+      clerkUserId,
+      resumeFilename,
+    } = job.data;
+    
+    // ==========================================
+    // STAGE 1: Full Text Extraction & Cleaning
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 1/6: Cleaning document text...', percent: 10 });
+    const cleanedResume = cleanText(resumeText);
+
+    // ==========================================
+    // STAGE 2: JD Intelligence Extraction
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 2/6: Extracting Job Description intelligence...', percent: 25 });
+    
+    const db = await getDb();
+    const jdHash = crypto.createHash('sha256').update(jobDescription.toLowerCase().trim()).digest('hex');
+    let jdIntel;
+    
+    const cachedIntel = await db.collection('jd_intelligence').findOne({ jdHash });
+    if (cachedIntel) {
+      console.log(`[Worker] Using cached JD Intelligence for hash ${jdHash}`);
+      jdIntel = cachedIntel.data;
+    } else {
+      const jdPrompt = JD_INTEL_USER_PROMPT.replace('{{JD_TEXT}}', jobDescription);
+      const { response, error } = await callOpenAIApi(jdPrompt, { systemPrompt: JD_INTEL_SYSTEM_PROMPT });
+      if (error) throw new Error("JD Intelligence Extraction failed: " + error);
+      jdIntel = JSON.parse(response);
+      await db.collection('jd_intelligence').insertOne({ jdHash, data: jdIntel, createdAt: new Date() });
+    }
+
+    // ==========================================
+    // STAGE 3: Resume Section Map & Facts
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 3/6: Mapping resume sections...', percent: 40 });
+    
+    const mapPrompt = RESUME_MAP_USER_PROMPT.replace('{{CLEANED_RESUME_TEXT}}', cleanedResume);
+    const mapRes = await callOpenAIApi(mapPrompt, { systemPrompt: RESUME_MAP_SYSTEM_PROMPT });
+    if (mapRes.error) throw new Error("Resume Mapping failed: " + mapRes.error);
+    const resumeMap = JSON.parse(mapRes.response);
+
+    // ==========================================
+    // STAGE 4: Section-Aware Chunking
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 4/6: Chunking text semantically...', percent: 55 });
+    
+    const lines = cleanedResume.split('\n');
+    const sections: {name: string, text: string}[] = [];
+    let currentSectionName = 'summary'; // default
+    let currentBlock: string[] = [];
+
+    // Extract raw headers from Stage 3 output
+    const rawHeaders: {key: string, normalized: string}[] = [];
+    if (resumeMap.sections) {
+      for (const [key, val] of Object.entries(resumeMap.sections)) {
+        const sectionData = val as any;
+        if (sectionData.present && sectionData.detectedHeaderRawText) {
+          rawHeaders.push({
+            key,
+            normalized: sectionData.detectedHeaderRawText.toLowerCase().replace(/\s+/g, ' ').trim()
+          });
+        }
+      }
+    }
+
+    for (const line of lines) {
+      const normLine = line.toLowerCase().replace(/\s+/g, ' ').trim();
+      const isShort = normLine.split(' ').length < 6;
+      const isBullet = normLine.startsWith('-');
+      
+      let matchedHeader = null;
+      if (isShort && !isBullet && normLine.length > 0) {
+        matchedHeader = rawHeaders.find(h => h.normalized === normLine);
+      }
+
+      if (matchedHeader) {
+        if (currentBlock.length > 0) {
+          sections.push({ name: currentSectionName, text: currentBlock.join('\n') });
+          currentBlock = [];
+        }
+        currentSectionName = matchedHeader.key;
+      } else {
+        currentBlock.push(line);
+      }
+    }
+    if (currentBlock.length > 0) {
+      sections.push({ name: currentSectionName, text: currentBlock.join('\n') });
+    }
+
+    const chunks: {section: string, text: string}[] = [];
+    for (const sec of sections) {
+      // Split into sentences (simple regex ending in punctuation followed by space and Capital)
+      const sentences = sec.text.match(/[^.!?]+[.!?]+(?=\s+[A-Z]|$)|[^.!?]+$/g) || [sec.text];
+      let currentChunk = '';
+      for (const sentence of sentences) {
+        if ((currentChunk + sentence).length > 800) { // approx 150-200 tokens
+          if (currentChunk.trim().length > 20) {
+            chunks.push({ section: sec.name, text: currentChunk.trim() });
+          }
+          currentChunk = sentence;
+        } else {
+          currentChunk += ' ' + sentence;
+        }
+      }
+      if (currentChunk.trim().length > 20) {
+        chunks.push({ section: sec.name, text: currentChunk.trim() });
+      }
+    }
+
+    // ==========================================
+    // STAGE 5: Semantic Vector Scoring
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 5/6: Vector similarity scoring...', percent: 70 });
+    
+    let semanticScore = 0;
+    const semanticGaps: any[] = [];
+    
+    try {
+      const jdEmbedding = await generateEmbedding(jobDescription.slice(0, 8000));
+      const points = [];
+      
+      for (const chunk of chunks) {
+        // Prepend metadata!
+        const prefix = `[${chunk.section.toUpperCase()}] `;
+        const embedding = await generateEmbedding(prefix + chunk.text);
+        points.push({
+          id: uuidv4(),
+          vector: embedding,
+          payload: { jobId: job.id, clerkUserId, text: chunk.text, section: chunk.section }
+        });
+      }
+
+      if (points.length > 0) {
+        await qdrantClient.upsert(COLLECTION_NAME, { wait: true, points });
+
+        const searchResult = await qdrantClient.search(COLLECTION_NAME, {
+          vector: jdEmbedding,
+          limit: 20, // Fetch up to 20 to get average coverage
+          filter: { must: [{ key: "jobId", match: { value: job.id } }] }
+        });
+
+        // Calculate weighted semantic score
+        const sectionWeights: Record<string, number> = {
+          experience: 2.0, skills: 1.8, projects: 1.5, education: 1.0, summary: 0.7
+        };
+
+        let totalWeightedScore = 0;
+        let totalWeight = 0;
+        const sectionScores: Record<string, { sum: number, count: number }> = {};
+
+        for (const hit of searchResult) {
+          const sec = hit.payload?.section as string || 'unknown';
+          const weight = sectionWeights[sec] || 0.5;
+          totalWeightedScore += hit.score * weight;
+          totalWeight += weight;
+          
+          if (!sectionScores[sec]) sectionScores[sec] = { sum: 0, count: 0 };
+          sectionScores[sec].sum += hit.score;
+          sectionScores[sec].count++;
+        }
+
+        if (totalWeight > 0) {
+          semanticScore = Math.round((totalWeightedScore / totalWeight) * 100);
+          if (semanticScore > 100) semanticScore = 100;
+        }
+
+        // Detect Gaps
+        for (const [sec, data] of Object.entries(sectionScores)) {
+          const avg = (data.sum / data.count) * 100;
+          if ((sec === 'experience' && avg < 65) || (sec === 'skills' && avg < 60)) {
+            semanticGaps.push({ section: sec, score: Math.round(avg) });
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[Worker] Semantic search failed for job ${job.id}:`, err);
+    }
+
+    // ==========================================
+    // STAGE 6: Master LLM Analysis
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 6/6: Generating master analysis...', percent: 85 });
+    
+    // Construct final dynamic prompt
+    const masterPrompt = MASTER_ANALYSIS_USER_PROMPT
+      .replace('{{CLEANED_RESUME_TEXT}}', cleanedResume)
+      .replace('{{JD_TEXT}}', jobDescription)
+      .replace('{{JD_INTEL_JSON}}', JSON.stringify(jdIntel))
+      .replace('{{RESUME_FACTS_JSON}}', JSON.stringify(resumeMap))
+      .replace('{{SEMANTIC_GAPS_JSON}}', JSON.stringify(semanticGaps))
+      .replace('{{W_SKILLS}}', jdIntel.rubricWeights?.technicalSkills?.toString() || "35")
+      .replace('{{W_YOE}}', jdIntel.rubricWeights?.yearsOfExperience?.toString() || "20")
+      .replace('{{W_EDU}}', jdIntel.rubricWeights?.education?.toString() || "10")
+      .replace('{{W_KEYWORDS}}', jdIntel.rubricWeights?.keywordCoverage?.toString() || "20")
+      .replace('{{W_SOFT}}', jdIntel.rubricWeights?.softSkillsAndLeadership?.toString() || "15");
+
+    const masterRes = await callOpenAIApi(masterPrompt, { systemPrompt: MASTER_ANALYSIS_SYSTEM_PROMPT });
+    if (masterRes.error) throw new Error("Master Analysis failed: " + masterRes.error);
+    
+    let finalAnalysis;
+    try {
+      finalAnalysis = JSON.parse(masterRes.response);
+      if (finalAnalysis.overallScore > 100) finalAnalysis.overallScore = 100;
+    } catch (e) {
+      throw new Error("Failed to parse Master Analysis JSON");
+    }
+
+    // Merge everything together
+    const analysisResult = {
+      ...finalAnalysis,
+      semanticScore,
+      semanticGaps,
+      jdIntel,
+      resumeFacts: resumeMap.extractedFacts,
+      atsWarnings: resumeMap.atsWarnings,
+    };
+
+    io.to(job.id!).emit('progress', { step: 'Saving results...', percent: 95 });
+
+    // Save to MongoDB
+    let analysisId: string | null = null;
+    try {
+      const db = await getDb();
+      const doc = {
+        clerkUserId,
+        resumeFilename,
+        resumeText: cleanedResume,
+        jobDescription,
+        ...analysisResult,
+        createdAt: new Date(),
+      };
+      const result = await db.collection('analyses').insertOne(doc);
+      analysisId = result.insertedId.toString();
+      console.log(`[Worker] Analysis saved to database: ${analysisId}`);
+    } catch (dbError) {
+      console.error(`[Worker] Failed to save analysis:`, dbError);
+    }
+
+    io.to(job.id!).emit('completed', { analysisId, analysisResult });
+    console.log(`[Worker] Finished processing job: ${job.id}`);
+    return { analysisId, ...analysisResult };
+  },
+  {
+    connection: redisConnection,
+  }
+);
+
+worker.on('failed', (job, err) => {
+  console.error(`[Worker] Job ${job?.id} failed with error:`, err);
+  if (job?.id) {
+    io.to(job.id).emit('error', { message: 'Analysis failed on the server. Please try again.' });
+  }
+});
+
+```
+
+
+**Tool Call: Read file `backend\index.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/index.ts
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import path from 'path';
+
+// Load environment variables from Next.js .env file
+dotenv.config({ path: path.resolve(process.cwd(), '.env') });
+
+import { initializeQdrant } from './lib/qdrant';
+import { verifyToken } from '@clerk/backend';
+import { Job } from 'bullmq';
+import { analyzeQueue } from '../app/lib/redis';
+
+const app = express();
+const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 3001;
+
+// Next.js will be running on 3000 locally, or a Vercel domain in production
+const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+const allowedOrigins = [frontendUrl, 'http://localhost:3000'];
+
+app.use(cors({ origin: allowedOrigins }));
+app.use(express.json());
+
+const httpServer = createServer(app);
+
+// Setup Socket.io
+export const io = new Server(httpServer, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ['GET', 'POST'],
+  },
+});
+
+// Authentication Middleware (Guard A & B)
+io.use(async (socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) {
+    return next(new Error('Authentication error: Missing token'));
+  }
+
+  try {
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY,
+    });
+    // payload.sub is the user ID
+    socket.data.userId = payload.sub;
+    next();
+  } catch (err) {
+    console.error('[Socket.io] Authentication failed:', err);
+    return next(new Error('Authentication error: Invalid token'));
+  }
+});
+
+io.on('connection', (socket) => {
+  console.log(`[Socket.io] Client connected: ${socket.id} (User: ${socket.data.userId})`);
+
+  // Clients join a room based on the jobId they want to track (Guard C)
+  socket.on('joinJobRoom', async (jobId: string) => {
+    try {
+      const job = await Job.fromId(analyzeQueue, jobId);
+      if (!job) {
+        socket.emit('error', { message: 'Job not found' });
+        return;
+      }
+
+      // Verify owner
+      if (job.data.clerkUserId === socket.data.userId) {
+        socket.join(jobId);
+        console.log(`[Socket.io] Socket ${socket.id} joined room: ${jobId}`);
+      } else {
+        socket.emit('error', { message: 'Unauthorized room access' });
+        console.warn(`[Socket.io] Unauthorized room join attempt by user ${socket.data.userId} for job ${jobId}`);
+      }
+    } catch (err) {
+      console.error(`[Socket.io] Error joining room:`, err);
+    }
+  });
+
+  socket.on('disconnect', () => {
+    console.log(`[Socket.io] Client disconnected: ${socket.id}`);
+  });
+});
+
+httpServer.listen(port, async () => {
+  console.log(`[Express] Server running on port ${port}`);
+  console.log(`[Socket.io] WebSocket server listening on port ${port}`);
+  await initializeQdrant();
+
+  // Import the BullMQ worker strictly AFTER io is exported and server is running
+  require('./worker');
+});
+
+```
+
+
+**Tool Call: Read file `package.json`**
+Status: Completed
+
+```resume-analyzer_upgraded/package.json
+{
+  "name": "resume-analyzer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "dev:server": "ts-node --project tsconfig.server.json backend/index.ts",
+    "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
+    "build:next": "next build",
+    "build:server": "tsc --project tsconfig.server.json",
+    "build": "npm run build:next && npm run build:server",
+    "start:next": "next start",
+    "start:server": "node dist-server/backend/index.js",
+    "start": "concurrently \"npm run start:next\" \"npm run start:server\"",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@clerk/backend": "^3.4.13",
+    "@clerk/express": "^2.1.20",
+    "@clerk/nextjs": "^6.28.1",
+    "@huggingface/inference": "^4.13.18",
+    "@qdrant/js-client-rest": "^1.18.0",
+    "@textlint/textlint-plugin-markdown": "^15.2.1",
+    "@types/uuid": "^10.0.0",
+    "bullmq": "^5.77.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "ioredis": "^5.10.1",
+    "lucide-react": "^0.536.0",
+    "mammoth": "^1.12.0",
+    "mongodb": "^7.2.0",
+    "next": "15.4.8",
+    "next-auth": "^4.24.11",
+    "next-themes": "^0.4.6",
+    "openai": "^5.11.0",
+    "pdf-parse": "^1.1.1",
+    "pdf2json": "^3.2.0",
+    "pdfjs-dist": "^5.7.284",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
+    "text-readability": "^1.1.1",
+    "textstat": "^0.8.0",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@tailwindcss/postcss": "^4",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^20",
+    "@types/pdfjs-dist": "^2.10.377",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "concurrently": "^9.2.1",
+    "eslint": "^9",
+    "eslint-config-next": "15.4.5",
+    "tailwindcss": "^4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
+
+```
+
+
+**Tool Call: Read file `app\components\ResumeForm.tsx`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/ResumeForm.tsx
+# First 1KB of C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\ResumeForm.tsx (file too large to show full content, and no outline available)
+
+'use client'
+
+import React, { useState, useRef, useEffect } from "react";
+import { Upload, FileText, Briefcase, Zap, CheckCircle, AlertCircle, Loader2, Target, User, LogOut, History, FileUp } from 'lucide-react';
+import { useUser, useAuth, SignInButton, SignOutButton } from '@clerk/nextjs';
+import Link from 'next/link';
+import { io } from 'socket.io-client';
+
+const ResumeForm: React.FC = () => {
+  const { isSignedIn, user, isLoaded } = useUser();
+  const { getToken } = useAuth();
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [jobDescription, setJobDescription] = useState("");
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState({ step: '', percent: 0 });
+  const [jdFile, setJdFile] = useState<File | null>(null);
+  const [extractingJD, setExtractingJD] = useState(false);
+  const resumeInputRef = useRef<HTMLInputElement>(null);
+  const jdInputRef = useRef<HTMLInputElement>(null);
+  const socketRef =
+```
+
+
+**Tool Call: Read file `app\components\Results.tsx`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/Results.tsx
+SUCCESS: File outline retrieved. This file is too large to read all at once, so the outline below shows the file's structure with line numbers.
+
+IMPORTANT: Do NOT retry this call without line numbers - you will get the same outline.
+Instead, use the line numbers below to read specific sections by calling this tool again with start_line and end_line parameters.
+
+# File outline for C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\Results.tsx
+
+interface AnalysisResult [L8-63]
+interface ResultsProps [L65-67]
+const Results [L69-356]
+ const getScoreColor [L70-75]
+  const percentage [L71]
+ const getScoreBg [L77-82]
+  const percentage [L78]
+ const getBarColor [L84-89]
+  const percentage [L85]
+ const getImpactColor [L91-98]
+ const label [L178]
+ width [L190]
+
+Showing symbols 1-12 (total symbols: 12)
+
+
+NEXT STEPS: To read a specific symbol's implementation, call read_file with the same path plus start_line and end_line from the outline above.
+For example, to read a function shown as [L100-150], use start_line: 100 and end_line: 150.
+```
+
+
+**Tool Call: Read file `app\components\Results.tsx` (lines 1-100)**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/Results.tsx
+import React from "react";
+import { 
+  CheckCircle, AlertTriangle, Target, FileText, 
+  TrendingUp, Users, Award, Zap, AlertCircle, ChevronRight, 
+  BookOpen, Code, Lightbulb, UserX
+} from 'lucide-react';
+
+export interface AnalysisResult {
+  overallScore: number;
+  scoreInterpretation: 'strong' | 'moderate' | 'weak';
+  rubricBreakdown: {
+    technicalSkills: { score: number; maxScore: number; rationale: string };
+    yearsOfExperience: { score: number; maxScore: number; rationale: string };
+    education: { score: number; maxScore: number; rationale: string };
+    keywordCoverage: { score: number; maxScore: number; rationale: string };
+    softSkillsAndLeadership: { score: number; maxScore: number; rationale: string };
+  };
+  seniorityMismatch: {
+    detected: boolean;
+    resumeLevel: string;
+    jdLevel: string;
+    message: string | null;
+  };
+  keywordAnalysis: {
+    matchedMustHave: string[];
+    missingMustHave: string[];
+    matchedNiceToHave: string[];
+    missingNiceToHave: string[];
+    unexpectedStrengths: string[];
+  };
+  atsAnalysis: {
+    overallAtsScore: number;
+    sectionFlags: Array<{ section: string; status: string; severity: string; advice: string }>;
+    formattingFlags: string[];
+  };
+  bulletFeedback: Array<{
+    original: string;
+    issue: string;
+    rewritten: string;
+    improvementType: string;
+  }>;
+  grammarAndStyle: {
+    issues: Array<{ text: string; issue: string; suggestion: string }>;
+    toneAssessment: string;
+    readabilityGrade: number;
+    usesFirstPerson: boolean;
+    tenseConsistency: string;
+  };
+  semanticInsights: {
+    strongestSections: string[];
+    weakestSections: string[];
+    meaningGaps: Array<{ area: string; gap: string; suggestion: string }>;
+  };
+  topPriorityActions: Array<{
+    priority: number;
+    action: string;
+    impact: 'high' | 'medium' | 'low';
+    effort: 'high' | 'medium' | 'low';
+  }>;
+  summaryVerdict: string;
+  semanticScore: number;
+  semanticGaps: Array<{ section: string; score: number }>;
+}
+
+interface ResultsProps {
+  analysis: AnalysisResult;
+}
+
+const Results: React.FC<ResultsProps> = ({ analysis }) => {
+  const getScoreColor = (score: number, maxScore: number = 100) => {
+    const percentage = (score / maxScore) * 100;
+    if (percentage >= 80) return 'text-green-600';
+    if (percentage >= 60) return 'text-yellow-600';
+    return 'text-red-600';
+  };
+
+  const getScoreBg = (score: number, maxScore: number = 100) => {
+    const percentage = (score / maxScore) * 100;
+    if (percentage >= 80) return 'bg-green-50 border-green-200';
+    if (percentage >= 60) return 'bg-yellow-50 border-yellow-200';
+    return 'bg-red-50 border-red-200';
+  };
+
+  const getBarColor = (score: number, maxScore: number = 100) => {
+    const percentage = (score / maxScore) * 100;
+    if (percentage >= 80) return 'bg-green-500';
+    if (percentage >= 60) return 'bg-yellow-500';
+    return 'bg-red-500';
+  };
+
+  const getImpactColor = (impact: string) => {
+    switch(impact) {
+      case 'high': return 'bg-red-100 text-red-800 border-red-200';
+      case 'medium': return 'bg-yellow-100 text-yellow-800 border-yellow-200';
+      case 'low': return 'bg-blue-100 text-blue-800 border-blue-200';
+      default: return 'bg-gray-100 text-gray-800 border-gray-200';
+    }
+  };
+
+  return (
+
+```
+
+
+**Tool Call: Read file `app\components\ResumeForm.tsx` (lines 1-100)**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/ResumeForm.tsx
+'use client'
+
+import React, { useState, useRef, useEffect } from "react";
+import { Upload, FileText, Briefcase, Zap, CheckCircle, AlertCircle, Loader2, Target, User, LogOut, History, FileUp } from 'lucide-react';
+import { useUser, useAuth, SignInButton, SignOutButton } from '@clerk/nextjs';
+import Link from 'next/link';
+import { io } from 'socket.io-client';
+
+const ResumeForm: React.FC = () => {
+  const { isSignedIn, user, isLoaded } = useUser();
+  const { getToken } = useAuth();
+  const [resumeFile, setResumeFile] = useState<File | null>(null);
+  const [jobDescription, setJobDescription] = useState("");
+  const [error, setError] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState({ step: '', percent: 0 });
+  const [jdFile, setJdFile] = useState<File | null>(null);
+  const [extractingJD, setExtractingJD] = useState(false);
+  const resumeInputRef = useRef<HTMLInputElement>(null);
+  const jdInputRef = useRef<HTMLInputElement>(null);
+  const socketRef = useRef<any>(null);
+
+  // Clean up socket connection on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.disconnect();
+      }
+    };
+  }, []);
+
+  // Reset file inputs on mount (fixes stale state after browser back navigation)
+  useEffect(() => {
+    if (resumeInputRef.current) resumeInputRef.current.value = '';
+    if (jdInputRef.current) jdInputRef.current.value = '';
+  }, []);
+
+  const handleJDFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setJdFile(file);
+    setExtractingJD(true);
+    setError("");
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/extract-text', { method: 'POST', body: formData });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Extraction failed');
+      }
+      const { text } = await res.json();
+      setJobDescription(text);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to extract text from file: ${message}. You can paste the job description manually.`);
+      console.error(err);
+    } finally {
+      setExtractingJD(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    // Check if user is signed in
+    if (!isSignedIn) {
+      setError("Please sign in to analyze your resume.");
+      return;
+    }
+    
+    if (!resumeFile && !jobDescription.trim()) {
+      setError("Please upload a resume or enter a job description.");
+      return;
+    }
+
+    setIsLoading(true);
+    setProgress({ step: 'Uploading file...', percent: 5 });
+    setError("");
+
+    try {
+      const formData = new FormData();
+      if (resumeFile) formData.append("resume", resumeFile);
+      formData.append("jobDescription", jobDescription);
+
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error("Analysis failed to start");
+      }
+
+      const data = await response.json();
+      const { jobId } = data;
+
+      if (!jobId) throw new Error("No job ID received");
+
+      // Grab the Clerk JWT token for secure socket connection
+
+```
+
+
+**Tool Call: Read file `app\components\ResumeForm.tsx` (lines 100-250)**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/ResumeForm.tsx
+      // Grab the Clerk JWT token for secure socket connection
+      const token = await getToken();
+
+      // Clean the URL to prevent double slashes (e.g. .com//socket.io/)
+      const rawSocketUrl = process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:3001';
+      const cleanSocketUrl = rawSocketUrl.replace(/\/$/, '');
+
+      // Connect to the Express Socket.io server
+      const socket = io(cleanSocketUrl, {
+        auth: { token }
+      });
+      socketRef.current = socket;
+
+      socket.on('connect', () => {
+        socket.emit('joinJobRoom', jobId);
+      });
+
+      socket.on('connect_error', (err) => {
+        setError(`Connection failed: ${err.message}. Ensure backend is running.`);
+        setIsLoading(false);
+        socket.disconnect();
+      });
+
+      socket.on('progress', (data) => {
+        setProgress({ step: data.step, percent: data.percent });
+      });
+
+      socket.on('completed', (result) => {
+        if (result.analysisId) {
+          window.location.href = `/results?id=${result.analysisId}`;
+        } else {
+          setError("Failed to save analysis to database. Please try again.");
+          setIsLoading(false);
+        }
+        socket.disconnect();
+      });
+
+      socket.on('error', (err) => {
+        setError(err.message || 'Analysis failed');
+        setIsLoading(false);
+        socket.disconnect();
+      });
+
+    } catch (err) {
+      setError("Failed to analyze resume. Please try again.");
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-black dark:via-black dark:to-zinc-900">
+
+
+      <div className="container mx-auto px-4 py-12">
+        {/* Hero Section */}
+        <div className="text-center mb-12">
+          <div className="flex justify-center mb-6">
+            <div className="p-4 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 rounded-full shadow-lg dark:shadow-[0_0_20px_rgba(236,72,153,0.5)]">
+              <Zap className="w-12 h-12 text-white" />
+            </div>
+          </div>
+          <h1 className="text-5xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-pink-400 dark:to-pink-600 bg-clip-text text-transparent mb-4">
+            Resume Analyzer
+          </h1>
+          <p className="text-xl text-gray-600 dark:text-gray-300 max-w-2xl mx-auto leading-relaxed">
+            Get instant insights on your resume's performance with AI-powered analysis. 
+            Optimize for ATS systems and improve your job match score.
+          </p>
+        </div>
+
+        {/* Main Form Container */}
+        <div className="max-w-4xl mx-auto">
+          <div className="bg-white dark:bg-zinc-950 rounded-2xl shadow-xl border border-gray-100 dark:border-pink-500/30 overflow-hidden dark:shadow-[0_0_30px_rgba(236,72,153,0.1)]">
+            
+            {/* Form Header */}
+            <div className="bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-600 dark:to-pink-800 px-8 py-6">
+              <h2 className="text-2xl font-bold text-white flex items-center gap-3">
+                <FileText className="w-7 h-7" />
+                Upload & Analyze
+              </h2>
+              <p className="text-blue-100 mt-2">Upload your resume and job description to get started</p>
+            </div>
+
+            <form onSubmit={handleSubmit} className="p-8">
+              <div className="grid md:grid-cols-2 gap-8">
+                
+                {/* Resume Upload Section */}
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3 mb-4">
+                    <div className="p-2 bg-blue-100 dark:bg-pink-900/30 rounded-lg">
+                      <Upload className="w-5 h-5 text-blue-600 dark:text-pink-500" />
+                    </div>
+                    <label htmlFor="resume" className="text-lg font-semibold text-gray-800 dark:text-white">
+                      Upload Resume
+                    </label>
+                  </div>
+                  
+                  <div className="relative">
+                    <input
+                      type="file"
+                      id="resume"
+                      ref={resumeInputRef}
+                      accept=".pdf"
+                      onClick={(e) => { (e.target as HTMLInputElement).value = ''; }}
+                      onChange={(e) => setResumeFile(e.target.files?.[0] || null)}
+                      className="hidden"
+                    />
+                    <label
+                      htmlFor="resume"
+                      className={`
+                        flex flex-col items-center justify-center w-full h-48 
+                        border-2 border-dashed rounded-xl cursor-pointer 
+                        transition-all duration-300 hover:bg-gray-50 dark:hover:bg-zinc-900
+                        ${resumeFile 
+                          ? 'border-green-400 bg-green-50 dark:bg-green-900/20 dark:border-green-500' 
+                          : 'border-gray-300 dark:border-zinc-700 hover:border-blue-400 dark:hover:border-pink-500'
+                        }
+                      `}
+                    >
+                      <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                        {resumeFile ? (
+                          <>
+                            <CheckCircle className="w-12 h-12 text-green-500 dark:text-green-400 mb-3" />
+                            <p className="text-green-700 dark:text-green-400 font-medium">{resumeFile.name}</p>
+                            <p className="text-sm text-green-600 dark:text-green-500">
+                              {(resumeFile.size / 1024 / 1024).toFixed(2)} MB • PDF
+                            </p>
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="w-12 h-12 text-gray-400 dark:text-zinc-500 mb-3" />
+                            <p className="mb-2 text-lg font-medium text-gray-700 dark:text-gray-300">
+                              Drop your PDF here
+                            </p>
+                            <p className="text-sm text-gray-500 dark:text-gray-400">or click to browse</p>
+                          </>
+                        )}
+                      </div>
+                    </label>
+                  </div>
+
+                  {resumeFile && (
+                    <div className="flex items-center gap-2 p-3 bg-green-50 dark:bg-green-900/20 rounded-lg border border-green-200 dark:border-green-500/30">
+                      <CheckCircle className="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0" />
+                      <span className="text-green-800 dark:text-green-400 text-sm font-medium">Resume uploaded successfully!</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Job Description Section */}
+                <div className="space-y-4">
+
+```
+
+
+**Tool Call: Read file `app\components\Results.tsx` (lines 100-356)**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/Results.tsx
+  return (
+    <div className="min-h-screen bg-gray-50 dark:bg-black py-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        
+        {/* Header */}
+        <div className="text-center mb-10">
+          <div className="flex justify-center mb-4">
+            <div className="p-3 bg-indigo-600 dark:bg-pink-600 dark:shadow-[0_0_20px_rgba(236,72,153,0.6)] rounded-full shadow-lg">
+              <FileText className="w-8 h-8 text-white" />
+            </div>
+          </div>
+          <h1 className="text-4xl md:text-5xl font-extrabold bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-pink-400 dark:to-pink-600 bg-clip-text text-transparent mb-3 tracking-tight">Executive Summary</h1>
+          <p className="text-xl text-gray-600 max-w-3xl mx-auto">{analysis.summaryVerdict}</p>
+        </div>
+
+        {/* Seniority Mismatch Alert */}
+        {analysis.seniorityMismatch.detected && (
+          <div className="mb-8 p-6 bg-red-50 border-l-4 border-red-500 rounded-r-xl shadow-sm flex items-start gap-4">
+            <UserX className="w-8 h-8 text-red-600 flex-shrink-0 mt-1" />
+            <div>
+              <h3 className="text-lg font-bold text-red-900 mb-1">Seniority Mismatch Detected</h3>
+              <p className="text-red-800">
+                You are applying for a <span className="font-bold">{analysis.seniorityMismatch.jdLevel}</span> role, 
+                but your resume reads as <span className="font-bold">{analysis.seniorityMismatch.resumeLevel}</span>. 
+                {analysis.seniorityMismatch.message}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Top Priority Actions - HERO SECTION */}
+        <div className="mb-10">
+          <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-6 flex items-center gap-2">
+            <Zap className="w-6 h-6 text-yellow-500 dark:text-pink-500" />
+            Top Priority Actions
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {analysis.topPriorityActions.map((action, idx) => (
+              <div key={idx} className="bg-white dark:bg-zinc-950 rounded-xl p-6 border border-gray-200 dark:border-pink-500/30 shadow-sm hover:shadow-md dark:shadow-[0_0_10px_rgba(236,72,153,0.1)] dark:hover:shadow-[0_0_20px_rgba(236,72,153,0.4)] transition-all relative overflow-hidden group">
+                <div className={`absolute top-0 left-0 w-2 h-full ${action.impact === 'high' ? 'bg-red-500 dark:bg-pink-600' : action.impact === 'medium' ? 'bg-yellow-500 dark:bg-pink-400' : 'bg-blue-500 dark:bg-pink-300'}`} />
+                <div className="flex justify-between items-start mb-3">
+                  <span className="text-sm font-bold text-gray-500 uppercase tracking-wider">Priority #{action.priority}</span>
+                  <span className={`text-xs px-2 py-1 rounded-full border font-semibold ${getImpactColor(action.impact)} dark:bg-transparent dark:text-pink-400 dark:border-pink-500`}>
+                    {action.impact.toUpperCase()} IMPACT
+                  </span>
+                </div>
+                <p className="text-gray-800 dark:text-gray-200 font-medium">{action.action}</p>
+                <div className="mt-4 pt-4 border-t border-gray-100 dark:border-zinc-800">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">Effort: {action.effort}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Scores Grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-10">
+          
+          {/* Main Overall Score Card */}
+          <div className={`col-span-1 lg:col-span-1 p-8 rounded-2xl border-2 dark:border-pink-500 shadow-lg dark:shadow-[0_0_25px_rgba(236,72,153,0.2)] ${getScoreBg(analysis.overallScore)} dark:bg-black flex flex-col justify-center items-center text-center`}>
+            <Target className="w-12 h-12 text-blue-600 dark:text-pink-500 mb-4" />
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-white mb-2">Overall Match Score</h2>
+            <div className={`text-7xl font-extrabold mb-4 ${getScoreColor(analysis.overallScore)} dark:text-pink-500 dark:drop-shadow-[0_0_10px_rgba(236,72,153,0.8)]`}>
+              {analysis.overallScore}<span className="text-3xl text-gray-400 dark:text-zinc-600">%</span>
+            </div>
+            <p className="text-lg text-gray-700 dark:text-gray-300 font-medium capitalize">
+              {analysis.scoreInterpretation} Alignment
+            </p>
+          </div>
+
+          {/* Rubric Breakdown */}
+          <div className="col-span-1 lg:col-span-2 bg-white dark:bg-zinc-950 p-8 rounded-2xl border border-gray-200 dark:border-pink-500/30 shadow-lg dark:shadow-[0_0_15px_rgba(236,72,153,0.15)]">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-6 flex items-center gap-2">
+              <Award className="w-6 h-6 text-indigo-600 dark:text-pink-500" />
+              Dynamic Scoring Rubric
+            </h2>
+            <div className="space-y-5">
+              {Object.entries(analysis.rubricBreakdown).map(([key, data]) => {
+                const label = key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase());
+                return (
+                  <div key={key}>
+                    <div className="flex justify-between items-end mb-1">
+                      <span className="text-sm font-bold text-gray-700 dark:text-gray-300">{label}</span>
+                      <span className={`text-sm font-bold ${getScoreColor(data.score, data.maxScore)} dark:text-pink-400`}>
+                        {data.score} / {data.maxScore} pts
+                      </span>
+                    </div>
+                    <div className="w-full h-2.5 bg-gray-100 dark:bg-zinc-800 rounded-full overflow-hidden mb-1">
+                      <div 
+                        className={`h-full ${getBarColor(data.score, data.maxScore)} dark:bg-pink-500 dark:shadow-[0_0_10px_rgba(236,72,153,0.8)]`}
+                        style={{ width: `${(data.score / data.maxScore) * 100}%` }}
+                      />
+                    </div>
+                    <p className="text-xs text-gray-500 italic">{data.rationale}</p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* Semantic & ATS Section */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-10">
+          
+          {/* Semantic Analysis */}
+          <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden">
+            <div className="bg-indigo-50 dark:bg-pink-950/30 px-6 py-4 border-b border-indigo-100 dark:border-pink-500/20 flex items-center gap-3">
+              <TrendingUp className="w-6 h-6 text-indigo-600 dark:text-pink-500" />
+              <h3 className="text-lg font-bold text-indigo-900 dark:text-pink-400">Semantic Meaning Gaps</h3>
+            </div>
+            <div className="p-6">
+              <div className="mb-6 flex items-center justify-between">
+                <span className="text-gray-700 dark:text-gray-300 font-medium">Overall Semantic Score:</span>
+                <span className={`text-2xl font-bold ${getScoreColor(analysis.semanticScore)} dark:text-pink-500 dark:drop-shadow-[0_0_8px_rgba(236,72,153,0.5)]`}>
+                  {analysis.semanticScore}%
+                </span>
+              </div>
+              
+              {analysis.semanticInsights.meaningGaps.length > 0 ? (
+                <div className="space-y-4">
+                  {analysis.semanticInsights.meaningGaps.map((gap, i) => (
+                    <div key={i} className="p-4 bg-indigo-50 dark:bg-zinc-900 rounded-lg border border-indigo-100 dark:border-zinc-800">
+                      <p className="text-sm font-bold text-indigo-900 dark:text-pink-400 mb-1">{gap.area.toUpperCase()}</p>
+                      <p className="text-sm text-indigo-800 dark:text-gray-300 mb-2"><span className="font-semibold">Gap:</span> {gap.gap}</p>
+                      <p className="text-sm text-indigo-700 dark:text-gray-400"><span className="font-semibold">Fix:</span> {gap.suggestion}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-green-600 font-medium flex items-center gap-2">
+                  <CheckCircle className="w-5 h-5" /> No major semantic gaps detected.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* ATS & Formatting */}
+          <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden">
+            <div className="bg-orange-50 dark:bg-pink-950/30 px-6 py-4 border-b border-orange-100 dark:border-pink-500/20 flex items-center gap-3">
+              <AlertCircle className="w-6 h-6 text-orange-600 dark:text-pink-500" />
+              <h3 className="text-lg font-bold text-orange-900 dark:text-pink-400">ATS & Section Analysis</h3>
+            </div>
+            <div className="p-6 space-y-6">
+              
+              {/* ATS Sections */}
+              <div>
+                <h4 className="text-sm font-bold text-gray-700 dark:text-gray-400 mb-3 uppercase tracking-wider">Required Sections</h4>
+                <div className="space-y-3">
+                  {analysis.atsAnalysis.sectionFlags.map((flag, i) => (
+                    <div key={i} className={`flex items-start gap-3 p-3 rounded-lg border ${
+                      flag.severity === 'critical' ? 'bg-red-50 border-red-200 text-red-800' :
+                      flag.severity === 'warning' ? 'bg-yellow-50 border-yellow-200 text-yellow-800' :
+                      'bg-blue-50 border-blue-200 text-blue-800'
+                    }`}>
+                      {flag.severity === 'critical' ? <AlertTriangle className="w-5 h-5 mt-0.5" /> : <AlertCircle className="w-5 h-5 mt-0.5" />}
+                      <div>
+                        <p className="text-sm font-bold">{flag.section.toUpperCase()} ({flag.status})</p>
+                        <p className="text-sm mt-1">{flag.advice}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        {/* Keywords Comparison */}
+        <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden mb-10">
+          <div className="bg-gray-50 dark:bg-pink-950/30 px-6 py-4 border-b border-gray-200 dark:border-pink-500/20 flex items-center gap-3">
+            <Code className="w-6 h-6 text-gray-700 dark:text-pink-500" />
+            <h3 className="text-lg font-bold text-gray-900 dark:text-pink-400">Keyword Coverage</h3>
+          </div>
+          <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-8">
+            {/* Must Haves */}
+            <div>
+              <h4 className="text-sm font-bold text-gray-700 dark:text-gray-300 mb-3 uppercase tracking-wider">Must-Have Skills</h4>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs font-semibold text-green-600 mb-2">MATCHED ({analysis.keywordAnalysis.matchedMustHave.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.matchedMustHave.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-green-100 text-green-800 rounded text-xs font-medium border border-green-200">{k}</span>
+                    ))}
+                    {analysis.keywordAnalysis.matchedMustHave.length === 0 && <span className="text-sm text-gray-500">None found</span>}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-red-600 mb-2">MISSING ({analysis.keywordAnalysis.missingMustHave.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.missingMustHave.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-red-100 text-red-800 rounded text-xs font-medium border border-red-200">{k}</span>
+                    ))}
+                    {analysis.keywordAnalysis.missingMustHave.length === 0 && <span className="text-sm text-gray-500">None missing!</span>}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Nice to Haves */}
+            <div>
+              <h4 className="text-sm font-bold text-gray-700 mb-3 uppercase tracking-wider">Nice-to-Have / Bonus Skills</h4>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-xs font-semibold text-blue-600 mb-2">MATCHED ({analysis.keywordAnalysis.matchedNiceToHave.length})</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.matchedNiceToHave.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-blue-100 text-blue-800 rounded text-xs font-medium border border-blue-200">{k}</span>
+                    ))}
+                    {analysis.keywordAnalysis.matchedNiceToHave.length === 0 && <span className="text-sm text-gray-500">None found</span>}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs font-semibold text-gray-500 mb-2">UNEXPECTED STRENGTHS (Consider highlighting these)</p>
+                  <div className="flex flex-wrap gap-2">
+                    {analysis.keywordAnalysis.unexpectedStrengths.map((k, i) => (
+                      <span key={i} className="px-2 py-1 bg-purple-100 text-purple-800 rounded text-xs font-medium border border-purple-200">{k}</span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Bullet Rewrites */}
+        {analysis.bulletFeedback.length > 0 && (
+          <div className="bg-white dark:bg-zinc-950 rounded-xl border border-gray-200 dark:border-pink-500/30 shadow-sm dark:shadow-[0_0_15px_rgba(236,72,153,0.1)] overflow-hidden mb-10">
+            <div className="bg-blue-50 dark:bg-pink-950/30 px-6 py-4 border-b border-blue-100 dark:border-pink-500/20 flex items-center gap-3">
+              <Lightbulb className="w-6 h-6 text-blue-600 dark:text-pink-500" />
+              <h3 className="text-lg font-bold text-blue-900 dark:text-pink-400">Experience Bullet Rewrites</h3>
+            </div>
+            <div className="p-6 space-y-6">
+              {analysis.bulletFeedback.map((item, i) => (
+                <div key={i} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="p-4 bg-gray-50 dark:bg-zinc-900 rounded-lg border border-gray-200 dark:border-zinc-800">
+                    <p className="text-xs font-bold text-gray-500 dark:text-gray-400 mb-2 uppercase">Original ({item.issue})</p>
+                    <p className="text-sm text-gray-700 dark:text-gray-300 italic">"{item.original}"</p>
+                  </div>
+                  <div className="p-4 bg-blue-50 dark:bg-pink-900/20 rounded-lg border border-blue-200 dark:border-pink-500/30 relative">
+                    <div className="hidden md:block absolute -left-3 top-1/2 -translate-y-1/2 w-6 h-6 bg-white dark:bg-black rounded-full border border-gray-200 dark:border-pink-500 flex items-center justify-center">
+                      <ChevronRight className="w-4 h-4 text-blue-500 dark:text-pink-500" />
+                    </div>
+                    <p className="text-xs font-bold text-blue-600 dark:text-pink-400 mb-2 uppercase">Suggested Rewrite</p>
+                    <p className="text-sm text-blue-900 dark:text-pink-200 font-medium">"{item.rewritten}"</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+};
+
+```
+
+
+**Tool Call: Read file `backend\lib\prompts.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts
+export const JD_INTEL_SYSTEM_PROMPT = `You are a job description analyst. Extract structured intelligence from a job description
+to drive a resume scoring rubric. Be precise and conservative — only mark a skill as
+"mustHave" if the JD explicitly states it as required, not just preferred.
+
+Return ONLY valid JSON matching the schema. No preamble, no explanation.`;
+
+export const JD_INTEL_USER_PROMPT = `Analyze this job description and return the following JSON:
+
+{
+  "roleTitle": string,
+  "seniorityLevel": "intern" | "junior" | "mid" | "senior" | "lead" | "executive",
+  "seniorityConfidence": "high" | "medium" | "low",
+  "senioritySignals": [string],         // phrases that indicated seniority e.g. "3-5 years required"
+  "yoeMin": number | null,              // minimum years of experience required (null if not stated)
+  "yoeMax": number | null,
+  "yoeExplicit": boolean,               // true if JD literally states a year range
+  "mustHaveSkills": [string],           // skills explicitly required
+  "niceToHaveSkills": [string],         // skills listed as preferred/bonus/plus
+  "educationRequired": "none" | "any" | "bachelors" | "masters" | "phd",
+  "educationFlexible": boolean,         // true if JD says "or equivalent experience"
+  "industryDomain": string,             // e.g. "fintech", "healthtech", "enterprise SaaS"
+  "softSkillsRequired": [string],       // e.g. ["communication", "cross-functional collaboration"]
+  "leadershipRequired": boolean,
+  "leadershipSignals": [string],        // phrases like "manage a team", "mentor juniors"
+  "remotePolicy": "remote" | "hybrid" | "onsite" | "unspecified",
+  "rubricWeights": {
+    "technicalSkills": number,          // must sum to 100
+    "yearsOfExperience": number,
+    "education": number,
+    "keywordCoverage": number,
+    "softSkillsAndLeadership": number
+  },
+  "rubricRationale": string             // 1-sentence explanation of why weights were chosen
+}
+
+Rubric weight rules you MUST follow:
+- intern/junior: technicalSkills 50, yearsOfExperience 5, education 10, keywordCoverage 25, softSkillsAndLeadership 10
+- mid: technicalSkills 40, yearsOfExperience 20, education 10, keywordCoverage 20, softSkillsAndLeadership 10
+- senior: technicalSkills 35, yearsOfExperience 25, education 10, keywordCoverage 15, softSkillsAndLeadership 15
+- lead: technicalSkills 30, yearsOfExperience 20, education 5, keywordCoverage 15, softSkillsAndLeadership 30
+- executive: technicalSkills 15, yearsOfExperience 15, education 5, keywordCoverage 10, softSkillsAndLeadership 55
+- If seniorityLevel is ambiguous, default to "mid" weights.
+
+---
+JOB DESCRIPTION:
+{{JD_TEXT}}`;
+
+export const RESUME_MAP_SYSTEM_PROMPT = `You are a resume parser. Your job is to identify the structural sections of a resume and
+extract structured facts from each. You must handle all common section name variations —
+"Work History", "Professional Experience", "Career Summary" are all valid names for
+standard ATS sections.
+
+Do NOT infer or guess information not present. If a field is absent, return null or [].
+Return ONLY valid JSON. No preamble, no markdown, no explanation.`;
+
+export const RESUME_MAP_USER_PROMPT = `Parse this resume and return the following JSON:
+
+{
+  "sections": {
+    "contactInfo":     { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null, "hasEmail": boolean, "hasPhone": boolean, "hasLinkedIn": boolean, "hasLocation": boolean },
+    "summary":         { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "experience":      { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "education":       { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "skills":          { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "projects":        { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "certifications":  { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "achievements":    { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null }
+  },
+  "extractedFacts": {
+    "fullName": string | null,
+    "totalYoe": number | null,              // summed from all experience date ranges
+    "yoeCalculationNote": string | null,    // e.g. "3 roles: 2019-2021, 2021-2023, 2023-present"
+    "highestEducation": "highschool" | "bachelors" | "masters" | "phd" | "unspecified",
+    "educationField": string | null,        // e.g. "Computer Science"
+    "allSkillsMentioned": [string],         // every technical skill found anywhere in resume
+    "programmingLanguages": [string],
+    "frameworks": [string],
+    "tools": [string],
+    "softSkillsMentioned": [string],
+    "companiesWorkedAt": [string],
+    "currentOrMostRecentTitle": string | null,
+    "senioritySignal": "intern" | "junior" | "mid" | "senior" | "lead" | "executive",
+    "hasQuantifiedAchievements": boolean,   // true if any bullet has numbers/percentages/metrics
+    "quantifiedAchievementCount": number,
+    "avgBulletLength": "short" | "medium" | "long",  // short <8 words, long >20 words
+    "usesFirstPerson": boolean,             // true if resume uses "I", "my", "me"
+    "tenseConsistency": "consistent" | "mixed" | "unknown"
+  },
+  "atsWarnings": [
+    {
+      "type": "missingSectionRequired" | "missingSectionRecommended" | "formattingIssue" | "contentIssue",
+      "message": string,
+      "severity": "critical" | "warning" | "info"
+    }
+  ]
+}
+
+---
+RESUME TEXT:
+{{CLEANED_RESUME_TEXT}}`;
+
+export const MASTER_ANALYSIS_SYSTEM_PROMPT = `You are an expert resume analyst and career coach with deep knowledge of ATS systems,
+hiring processes, and resume best practices across industries.
+
+You will receive:
+1. A cleaned resume text
+2. A job description
+3. Pre-extracted JD intelligence (seniority, required skills, dynamic rubric weights)
+4. Pre-extracted resume facts (YoE, skills, section map)
+5. Semantic similarity gaps (sections where resume meaning doesn't match JD)
+
+Your job is to produce a comprehensive, actionable analysis. Be specific — generic advice
+like "add more skills" is useless. Reference actual content from the resume and JD.
+
+CRITICAL RULES:
+- Use the provided rubricWeights EXACTLY. Do not use a hardcoded rubric.
+- Score each rubric category independently, then compute the weighted total.
+- If yoeExplicit is false in JD intel, do not heavily penalise the candidate for YoE.
+- Detect seniority mismatch: if resume senioritySignal != JD seniorityLevel, flag it.
+- All bullet rewrites must start with a strong action verb and include a metric where possible.
+- Return ONLY valid JSON. No preamble, no markdown fences.`;
+
+export const MASTER_ANALYSIS_USER_PROMPT = `Produce a full resume analysis using the inputs below.
+
+Return this exact JSON schema:
+
+{
+  "overallScore": number,                 // 0-100, weighted sum of rubric scores
+  "scoreInterpretation": "strong" | "moderate" | "weak",
+  "rubricBreakdown": {
+    "technicalSkills":        { "score": number, "maxScore": number, "rationale": string },
+    "yearsOfExperience":      { "score": number, "maxScore": number, "rationale": string },
+    "education":              { "score": number, "maxScore": number, "rationale": string },
+    "keywordCoverage":        { "score": number, "maxScore": number, "rationale": string },
+    "softSkillsAndLeadership":{ "score": number, "maxScore": number, "rationale": string }
+  },
+  "seniorityMismatch": {
+    "detected": boolean,
+    "resumeLevel": string,
+    "jdLevel": string,
+    "message": string | null
+  },
+  "keywordAnalysis": {
+    "matchedMustHave":    [string],        // must-have JD skills found in resume
+    "missingMustHave":    [string],        // must-have JD skills NOT found
+    "matchedNiceToHave":  [string],
+    "missingNiceToHave":  [string],
+    "unexpectedStrengths":[string]         // strong skills in resume not in JD — candidate should highlight these if relevant
+  },
+  "atsAnalysis": {
+    "overallAtsScore": number,             // 0-100
+    "sectionFlags": [
+      { "section": string, "status": "present" | "missing" | "weak", "severity": "critical"|"warning"|"info", "advice": string }
+    ],
+    "formattingFlags": [string]            // e.g. "Uses tables — may break ATS parsers"
+  },
+  "bulletFeedback": [
+    {
+      "original": string,                  // exact bullet from resume
+      "issue": string,                     // what's wrong: weak verb, no metric, too long, etc.
+      "rewritten": string,                 // improved version
+      "improvementType": "actionVerb" | "addMetric" | "clarity" | "relevance"
+    }
+  ],
+  "grammarAndStyle": {
+    "issues": [
+      { "text": string, "issue": string, "suggestion": string }
+    ],
+    "toneAssessment": string,
+    "readabilityGrade": number,
+    "usesFirstPerson": boolean,
+    "tenseConsistency": string
+  },
+  "semanticInsights": {
+    "strongestSections": [string],         // section names where semantic score was highest
+    "weakestSections":   [string],         // section names where semantic score was lowest
+    "meaningGaps": [
+      { "area": string, "gap": string, "suggestion": string }
+    ]
+  },
+  "topPriorityActions": [                  // max 5, ordered by impact
+    { "priority": number, "action": string, "impact": "high"|"medium"|"low", "effort": "high"|"medium"|"low" }
+  ],
+  "summaryVerdict": string                 // 2-3 sentence honest assessment for the candidate
+}
+
+---
+RESUME TEXT (FULL):
+{{CLEANED_RESUME_TEXT}}
+
+---
+JOB DESCRIPTION:
+{{JD_TEXT}}
+
+---
+JD INTELLIGENCE (from prior analysis):
+{{JD_INTEL_JSON}}
+
+---
+RESUME FACTS (from prior parsing):
+{{RESUME_FACTS_JSON}}
+
+---
+SEMANTIC GAPS (sections with low vector similarity):
+{{SEMANTIC_GAPS_JSON}}
+
+---
+RUBRIC WEIGHTS TO USE:
+technicalSkills: {{W_SKILLS}}, yearsOfExperience: {{W_YOE}}, 
+education: {{W_EDU}}, keywordCoverage: {{W_KEYWORDS}}, 
+softSkillsAndLeadership: {{W_SOFT}}`;
+
+```
+
+
+**Tool Call: Read file `backend\lib\embeddings.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/lib/embeddings.ts
+import { HfInference } from '@huggingface/inference';
+
+// Initialize the Hugging Face Inference API client
+const hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
+
+/**
+ * Generates an embedding for a given text using a free Hugging Face model.
+ * Default model: all-MiniLM-L6-v2 (produces 384-dimensional vectors).
+ */
+export async function generateEmbedding(text: string): Promise<number[]> {
+  try {
+    const response = await hf.featureExtraction({
+      model: 'sentence-transformers/all-MiniLM-L6-v2',
+      inputs: text,
+    });
+    
+    // The API can return a 1D, 2D, or 3D array depending on inputs.
+    // For a single string input, it usually returns number[].
+    const embedding = Array.isArray(response[0]) ? response[0] : response;
+    return embedding as number[];
+  } catch (error) {
+    console.error('[Embeddings] Failed to generate embedding:', error);
+    throw new Error('Failed to generate embedding');
+  }
+}
+
+```
+
+
+**Tool Call: Read file `backend\lib\qdrant.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/lib/qdrant.ts
+import { QdrantClient } from '@qdrant/js-client-rest';
+
+const qdrantUrl = process.env.QDRANT_URL || 'http://localhost:6333';
+const qdrantApiKey = process.env.QDRANT_API_KEY || '';
+
+export const qdrantClient = new QdrantClient({
+  url: qdrantUrl,
+  apiKey: qdrantApiKey,
+});
+
+export const COLLECTION_NAME = 'resume_chunks';
+export const VECTOR_SIZE = 384; // all-MiniLM-L6-v2 outputs 384 dimensions
+
+/**
+ * Initializes the Qdrant collection if it doesn't already exist.
+ */
+export async function initializeQdrant() {
+  try {
+    const collections = await qdrantClient.getCollections();
+    const exists = collections.collections.some(c => c.name === COLLECTION_NAME);
+
+    if (!exists) {
+      console.log(`[Qdrant] Collection '${COLLECTION_NAME}' not found. Creating...`);
+      await qdrantClient.createCollection(COLLECTION_NAME, {
+        vectors: {
+          size: VECTOR_SIZE,
+          distance: 'Cosine',
+        },
+      });
+      console.log(`[Qdrant] Collection '${COLLECTION_NAME}' created successfully.`);
+    } else {
+      console.log(`[Qdrant] Collection '${COLLECTION_NAME}' already exists.`);
+    }
+
+    // Ensure the payload index exists for filtering
+    try {
+      await qdrantClient.createPayloadIndex(COLLECTION_NAME, {
+        field_name: 'jobId',
+        field_schema: 'keyword',
+      });
+      console.log(`[Qdrant] Payload index for 'jobId' ensured.`);
+    } catch (indexError: any) {
+      // Ignore if it already exists
+      if (!indexError.message?.includes('already exists')) {
+        console.error(`[Qdrant] Note: Payload index creation returned:`, indexError.message);
+      }
+    }
+  } catch (error) {
+    console.error('[Qdrant] Failed to initialize collection:', error);
+    // Don't throw here, just log, so the server can still start even if Qdrant isn't ready
+  }
+}
+
+```
+
+
+**Tool Call: Read file `app\lib\openai-api.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/lib/openai-api.ts
+// app/lib/openai-api.ts
+// Utility function to call Open AI’s API for resume analysis tasks (NLP, grammar, etc.).
+
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+interface OpenAIResponse {
+  response: string;
+  error?: string;
+}
+
+export async function callOpenAIApi(
+  prompt: string,
+  options: { temperature?: number; max_tokens?: number; systemPrompt?: string } = {}
+): Promise<OpenAIResponse> {
+  try {
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: options.systemPrompt || "You are an expert resume analyzer." },
+        { role: "user", content: prompt },
+      ],
+      response_format: { type: "json_object" },
+      temperature: options.temperature ?? 0, // Default to 0 for consistency
+      max_tokens: options.max_tokens ?? 2500, // Increased default to 2500 for larger outputs
+    });
+
+    const response = completion.choices[0].message.content;
+    if (!response) {
+      throw new Error("No response from Open AI API");
+    }
+
+    return { response };
+  } catch (error) {
+    console.error("Open AI API error details:", error);
+    return {
+      response: "",
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
+  }
+}
+```
+
+
+**Tool Call: Read file `app\lib\mongodb.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/lib/mongodb.ts
+import { MongoClient, Db } from 'mongodb';
+
+const MONGODB_URI = process.env.DATABASE_URL || 'mongodb://localhost:27017/resume-analyzer';
+const DB_NAME = 'resume-analyzer';
+
+let client: MongoClient | null = null;
+let db: Db | null = null;
+
+export async function getDb(): Promise<Db> {
+  if (db) return db;
+
+  client = new MongoClient(MONGODB_URI);
+  await client.connect();
+  db = client.db(DB_NAME);
+  return db;
+}
+
+```
+
+
+**Tool Call: Read file `app\lib\redis.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/lib/redis.ts
+import Redis from 'ioredis';
+import { Queue } from 'bullmq';
+
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+
+// Prevent maxEventListeners warning when multiple queues connect
+export const redisConnection = new Redis(REDIS_URL, {
+  maxRetriesPerRequest: null, // BullMQ requires this
+});
+
+export const analyzeQueue = new Queue('analyze-resume', {
+  connection: redisConnection,
+});
+
+```
+
+
+**Tool Call: Read file `app\api\analyze`**
+Status: Failed
+
+```json
+{
+  "Text": "opening file \"C:\\\\code\\\\30day_challange\\\\AI\\\\resume-analyzer_upgraded\\\\app\\\\api\\\\analyze\""
+}
+```
+
+**Tool Call: Read file `app\api\analysis`**
+Status: Failed
+
+```json
+{
+  "Text": "opening file \"C:\\\\code\\\\30day_challange\\\\AI\\\\resume-analyzer_upgraded\\\\app\\\\api\\\\analysis\""
+}
+```
+
+**Tool Call: Read file `app\api\history`**
+Status: Failed
+
+```json
+{
+  "Text": "opening file \"C:\\\\code\\\\30day_challange\\\\AI\\\\resume-analyzer_upgraded\\\\app\\\\api\\\\history\""
+}
+```
+
+**Tool Call: 4 matches**
+Status: Completed
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\api\analysis\[id]\route.ts
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\api\analyze\route.ts
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\api\extract-text\route.ts
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\api\history\route.ts
+
+**Tool Call: Read file `app\api\analyze\route.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/api/analyze/route.ts
+import { NextResponse } from "next/server";
+import { auth } from '@clerk/nextjs/server';
+import { parsePdf } from "@/app/lib/pdf-parser";
+import { countImagesInPDF } from "@/app/lib/pdf-image-detector";
+import { analyzeQueue } from "@/app/lib/redis";
+
+// Export AnalysisResult interface for use in other files
+export interface AnalysisResult {
+  matchScore: number;
+  matchingKeywords: string[];
+  missingKeywords: string[];
+  atsIssues: string[];
+  actionVerbFeedback: Array<{ bullet: string; feedback: string }>;
+  readabilityScore: number;
+  grammarIssues: string[];
+}
+
+// Simple readability calculator (fallback)
+function calculateReadabilityScore(text: string): number {
+  const sentences = text.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  const words = text.split(/\s+/).filter(w => w.trim().length > 0);
+  const avgWordsPerSentence = words.length / sentences.length;
+  
+  // Simple approximation: higher words per sentence = higher grade level
+  return Math.min(Math.max(avgWordsPerSentence * 0.5, 1), 12);
+}
+
+export async function POST(request: Request) {
+  try {
+    // Authenticate the user
+    const { userId: clerkUserId } = await auth();
+    if (!clerkUserId) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const formData = await request.formData();
+    const resumeFile = formData.get("resume") as File | null;
+    const jobDescription = formData.get("jobDescription") as string;
+
+    if (!resumeFile || !jobDescription) {
+      return NextResponse.json(
+        { error: "Resume file and job description are required" },
+        { status: 400 }
+      );
+    }
+
+    // Verify file type
+    if (resumeFile.type !== "application/pdf") {
+      return NextResponse.json(
+        { error: "Please upload a PDF file" },
+        { status: 400 }
+      );
+    }
+
+    // ✅ Read file buffer once
+    const buffer = Buffer.from(await resumeFile.arrayBuffer());
+
+    // ✅ Detect embedded images in the PDF
+    let imageCount = 0;
+    try {
+      imageCount = await countImagesInPDF(buffer);
+    } catch (e) {
+      console.warn("Image detection failed, continuing without:", e);
+    }
+
+    // ✅ Extract text from PDF using our custom pdf-parser
+    let resumeText: string;
+    try {
+      const parsed = await parsePdf(buffer);
+      resumeText = parsed.text;
+
+      if (!resumeText.trim()) {
+        return NextResponse.json(
+          {
+            error:
+              "No text could be extracted from the PDF. Please upload a text-based PDF (not scanned or image-based).",
+          },
+          { status: 400 }
+        );
+      }
+    } catch (error) {
+      console.error("PDF parsing error:", error);
+      return NextResponse.json(
+        {
+          error:
+            "Failed to parse PDF file. Ensure it's a valid, text-based PDF.",
+        },
+        { status: 500 }
+      );
+    }
+
+    // ✅ Basic ATS checks
+    const atsIssues: string[] = [];
+    if (!resumeText.match(/(Work Experience|Experience)/i)) {
+      atsIssues.push("Missing 'Work Experience' section.");
+    }
+    if (!resumeText.match(/Education/i)) {
+      atsIssues.push("Missing 'Education' section.");
+    }
+    if (!resumeText.includes("@")) {
+      atsIssues.push("Missing email in 'Contact Info' section.");
+    }
+
+    // ✅ Image detection warning
+    if (imageCount > 0) {
+      atsIssues.push(
+        `Resume contains ${imageCount} embedded image(s), possibly a photo. Many ATS systems cannot parse images and may misread the section. Consider removing the photo for better compatibility.`
+      );
+    }
+
+    // ✅ Readability score using simple calculation
+    let readabilityScore = 0;
+    try {
+      readabilityScore = calculateReadabilityScore(resumeText);
+    } catch (error) {
+      atsIssues.push("Unable to calculate readability score due to text issues.");
+    }
+
+    // 🔥 Push to BullMQ instead of processing here
+    const job = await analyzeQueue.add('analyze', {
+      resumeText,
+      jobDescription,
+      clerkUserId,
+      resumeFilename: resumeFile.name,
+      atsIssues,
+      readabilityScore,
+    });
+
+    console.log(`[API] Added job to queue: ${job.id}`);
+
+    // Return the jobId immediately so the client can listen to websockets
+    return NextResponse.json({
+      jobId: job.id,
+      message: 'Analysis job queued successfully',
+    });
+  } catch (error) {
+    console.error("API error:", error);
+    return NextResponse.json(
+      { error: "Internal server error" },
+      { status: 500 }
+    );
+  }
+}
+```
+
+
+**Tool Call: Read file `app\api\analysis\[id]\route.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/api/analysis/[id]/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
+import { ObjectId } from 'mongodb';
+import { getDb } from '@/app/lib/mongodb';
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const { id } = await params;
+
+  // Validate ObjectId format
+  if (!ObjectId.isValid(id)) {
+    return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+  }
+
+  try {
+    const db = await getDb();
+    const analysis = await db.collection('analyses').findOne({
+      _id: new ObjectId(id),
+      clerkUserId: userId,
+    });
+
+    if (!analysis) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+
+    // Remove internal MongoDB _id and Clerk user ID before sending to client
+    const { _id, clerkUserId, ...safeAnalysis } = analysis;
+
+    return NextResponse.json(safeAnalysis);
+  } catch (error) {
+    console.error('Error fetching analysis:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch analysis' },
+      { status: 500 }
+    );
+  }
+}
+
+```
+
+
+**Tool Call: Read file `app\api\history\route.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/api/history/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
+import { getDb } from '@/app/lib/mongodb';
+
+export async function GET(req: NextRequest) {
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  try {
+    const db = await getDb();
+
+    // Fetch all analyses for this user, newest first
+    const analyses = await db
+      .collection('analyses')
+      .find({ clerkUserId: userId })
+      .sort({ createdAt: -1 })
+      .project({
+        _id: 1,
+        resumeFilename: 1,
+        matchScore: 1, // Legacy
+        atsIssues: 1, // Legacy
+        matchingKeywords: 1, // Legacy
+        missingKeywords: 1, // Legacy
+        overallScore: 1, // New
+        keywordAnalysis: 1, // New
+        atsAnalysis: 1, // New
+        createdAt: 1,
+      })
+      .toArray();
+
+    const formatted = analyses.map((a) => {
+      // Handle Score (Legacy vs New)
+      const score = a.overallScore ?? a.matchScore ?? 0;
+
+      // Handle ATS Issues Count
+      let atsCount = 0;
+      if (a.atsAnalysis?.sectionFlags) {
+        atsCount = a.atsAnalysis.sectionFlags.filter((f: any) => f.status === 'missing').length;
+      } else if (a.atsIssues) {
+        atsCount = a.atsIssues.length;
+      }
+
+      // Handle Keywords
+      let matchedCount = 0;
+      let missingCount = 0;
+      if (a.keywordAnalysis) {
+        matchedCount = (a.keywordAnalysis.matchedMustHave?.length || 0) + (a.keywordAnalysis.matchedNiceToHave?.length || 0);
+        missingCount = (a.keywordAnalysis.missingMustHave?.length || 0) + (a.keywordAnalysis.missingNiceToHave?.length || 0);
+      } else {
+        matchedCount = a.matchingKeywords?.length || 0;
+        missingCount = a.missingKeywords?.length || 0;
+      }
+
+      return {
+        id: a._id.toString(),
+        resumeFilename: a.resumeFilename,
+        matchScore: score,
+        atsIssueCount: atsCount,
+        matchingKeywordCount: matchedCount,
+        missingKeywordCount: missingCount,
+        createdAt: a.createdAt,
+      };
+    });
+
+    return NextResponse.json({ analyses: formatted });
+  } catch (error) {
+    console.error('Error fetching history:', error);
+    return NextResponse.json(
+      { error: 'Failed to fetch history' },
+      { status: 500 }
+    );
+  }
+}
+
+```
+
+
+**Tool Call: Read file `app\api\extract-text\route.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/api/extract-text/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
+import { parsePdf } from '@/app/lib/pdf-parser';
+import mammoth from 'mammoth';
+
+export async function POST(req: NextRequest) {
+  const { userId } = await auth();
+  if (!userId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+  }
+
+  const formData = await req.formData();
+  const file = formData.get('file') as File | null;
+  if (!file) {
+    return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
+  }
+
+  // Validate file type
+  const allowedTypes = [
+    'application/pdf',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ];
+  const isAllowed =
+    allowedTypes.includes(file.type) ||
+    file.name.endsWith('.pdf') ||
+    file.name.endsWith('.docx');
+
+  if (!isAllowed) {
+    return NextResponse.json(
+      { error: 'Only PDF and DOCX files are allowed' },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    let text = '';
+
+    if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+      // Reuse the existing pdf-parser wrapper to avoid the debug-mode ENOENT bug
+      const data = await parsePdf(buffer);
+      text = data.text;
+    } else {
+      // DOCX
+      const result = await mammoth.extractRawText({ buffer });
+      text = result.value;
+    }
+
+    const trimmed = text.trim();
+    if (!trimmed) {
+      return NextResponse.json(
+        { error: 'No text could be extracted from the file' },
+        { status: 400 }
+      );
+    }
+
+    return NextResponse.json({ text: trimmed });
+  } catch (error) {
+    console.error('Text extraction error:', error);
+    return NextResponse.json(
+      { error: 'Failed to extract text from file' },
+      { status: 500 }
+    );
+  }
+}
+
+```
+
+
+**Tool Call: Read file `app\results`**
+Status: Failed
+
+```json
+{
+  "Text": "opening file \"C:\\\\code\\\\30day_challange\\\\AI\\\\resume-analyzer_upgraded\\\\app\\\\results\""
+}
+```
+
+**Tool Call: Read file `app\history`**
+Status: Failed
+
+```json
+{
+  "Text": "opening file \"C:\\\\code\\\\30day_challange\\\\AI\\\\resume-analyzer_upgraded\\\\app\\\\history\""
+}
+```
+
+**Tool Call: Read file `app\components\Navbar.tsx`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/Navbar.tsx
+'use client';
+
+import React from 'react';
+import Link from 'next/link';
+import { useUser, SignInButton, SignOutButton } from '@clerk/nextjs';
+import { Zap, History, User, LogOut } from 'lucide-react';
+import { ThemeToggle } from './ThemeToggle';
+
+export default function Navbar() {
+  const { isSignedIn, user, isLoaded } = useUser();
+
+  return (
+    <nav className="bg-white/80 dark:bg-black/80 backdrop-blur-md border-b border-gray-200 dark:border-pink-500/30 sticky top-0 z-50">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex justify-between items-center h-16">
+          <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
+            <div className="p-2 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 rounded-lg dark:shadow-[0_0_15px_rgba(236,72,153,0.5)]">
+              <Zap className="w-6 h-6 text-white" />
+            </div>
+            <span className="text-xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-pink-400 dark:to-pink-600 bg-clip-text text-transparent">
+              Resume Analyzer
+            </span>
+          </Link>
+          
+          <div className="flex items-center gap-4">
+            <ThemeToggle />
+            {isSignedIn && (
+              <Link
+                href="/history"
+                className="flex items-center gap-2 px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-gray-800 dark:hover:text-pink-400 hover:bg-gray-100 dark:hover:bg-pink-900/20 rounded-lg transition-colors"
+              >
+                <History className="w-4 h-4" />
+                <span className="text-sm font-medium">History</span>
+              </Link>
+            )}
+            
+            {!isLoaded ? (
+              <div className="w-8 h-8 bg-gray-200 dark:bg-zinc-800 rounded-full animate-pulse"></div>
+            ) : isSignedIn ? (
+              <div className="flex items-center gap-3">
+                <div className="hidden sm:flex items-center gap-2 px-3 py-2 bg-gray-100 dark:bg-zinc-900 rounded-lg dark:border dark:border-pink-500/20">
+                  <User className="w-4 h-4 text-gray-600 dark:text-pink-500" />
+                  <span className="text-sm font-medium text-gray-700 dark:text-gray-200">
+                    {user?.firstName || user?.emailAddresses[0]?.emailAddress}
+                  </span>
+                </div>
+                <SignOutButton>
+                  <button className="flex items-center gap-2 px-4 py-2 text-gray-600 dark:text-gray-300 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 rounded-lg transition-colors">
+                    <LogOut className="w-4 h-4" />
+                    <span className="text-sm font-medium">Sign Out</span>
+                  </button>
+                </SignOutButton>
+              </div>
+            ) : (
+              <SignInButton mode="modal">
+                <button className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 dark:hover:from-pink-600 dark:hover:to-pink-700 dark:shadow-[0_0_10px_rgba(236,72,153,0.4)] transition-all">
+                  <User className="w-4 h-4" />
+                  <span className="text-sm font-medium">Sign In</span>
+                </button>
+              </SignInButton>
+            )}
+          </div>
+        </div>
+      </div>
+    </nav>
+  );
+}
+
+```
+
+
+**Tool Call: 9 matches**
+Status: Completed
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\Navbar.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\Results.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\ResumeForm.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\ThemeProvider.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\components\ThemeToggle.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\history\page.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\layout.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\page.tsx
+
+file://C:\code\30day_challange\AI\resume-analyzer_upgraded\app\results\page.tsx
+
+**Tool Call: Read file `app\results\page.tsx`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/results/page.tsx
+'use client';
+
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useState } from 'react';
+import Results from '../components/Results';
+import { FileText, AlertCircle, Loader2 } from 'lucide-react';
+
+import { AnalysisResult } from '../components/Results';
+
+function ResultsContent() {
+  const searchParams = useSearchParams();
+  const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const id = searchParams.get('id');
+    const data = searchParams.get('data');
+
+    if (id) {
+      // Fetch from database via API
+      fetch(`/api/analysis/${id}`)
+        .then(async (res) => {
+          if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.error || 'Failed to fetch analysis');
+          }
+          return res.json();
+        })
+        .then((result) => {
+          setAnalysis(result);
+        })
+        .catch((err) => {
+          setError(err.message || 'Failed to load analysis results.');
+        })
+        .finally(() => {
+          setLoading(false);
+        });
+    } else if (data) {
+      // Legacy: parse from URL query param
+      try {
+        const parsed = JSON.parse(decodeURIComponent(data)) as AnalysisResult;
+        setAnalysis(parsed);
+      } catch (err) {
+        setError('Failed to parse analysis data.');
+      }
+      setLoading(false);
+    } else {
+      setError('No analysis data provided.');
+      setLoading(false);
+    }
+  }, [searchParams]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center px-4">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
+          <p className="text-gray-600 font-medium">Loading analysis results...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center px-4">
+        <div className="bg-white rounded-xl shadow-xl border border-red-200 p-8 max-w-md w-full">
+          <div className="flex items-center gap-3 mb-4">
+            <AlertCircle className="w-6 h-6 text-red-600" />
+            <h1 className="text-2xl font-bold text-gray-900">Error</h1>
+          </div>
+          <p className="text-red-700 font-medium">{error}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!analysis) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center px-4">
+        <div className="flex items-center gap-3">
+          <FileText className="w-8 h-8 text-blue-600 animate-pulse" />
+          <p className="text-gray-600 font-medium">Loading analysis...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <main>
+      <Results analysis={analysis} />
+    </main>
+  );
+}
+
+export default function ResultsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 flex items-center justify-center px-4">
+          <div className="flex flex-col items-center gap-4">
+            <Loader2 className="w-10 h-10 text-blue-600 animate-spin" />
+            <p className="text-gray-600 font-medium">Loading...</p>
+          </div>
+        </div>
+      }
+    >
+      <ResultsContent />
+    </Suspense>
+  );
+}
+```
+
+
+**Tool Call: Read file `app\history\page.tsx`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/history/page.tsx
+'use client';
+
+import React, { useState, useEffect } from 'react';
+import { History, FileText, Target, AlertTriangle, CheckCircle, Loader2, Zap, ArrowRight, Clock } from 'lucide-react';
+import { useUser, SignInButton } from '@clerk/nextjs';
+import Link from 'next/link';
+
+interface AnalysisSummary {
+  id: string;
+  resumeFilename: string;
+  matchScore: number;
+  atsIssueCount: number;
+  matchingKeywordCount: number;
+  missingKeywordCount: number;
+  createdAt: string;
+}
+
+export default function HistoryPage() {
+  const { isSignedIn, isLoaded } = useUser();
+  const [analyses, setAnalyses] = useState<AnalysisSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isLoaded || !isSignedIn) return;
+
+    const fetchHistory = async () => {
+      try {
+        const res = await fetch('/api/history');
+        if (!res.ok) throw new Error('Failed to fetch history');
+        const data = await res.json();
+        setAnalyses(data.analyses);
+      } catch (err) {
+        setError('Failed to load analysis history.');
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchHistory();
+  }, [isLoaded, isSignedIn]);
+
+  // Helper function to get score color classes
+  const getScoreColor = (score: number) => {
+    if (score >= 80) return 'text-green-600 bg-green-50 border-green-200';
+    if (score >= 60) return 'text-yellow-600 bg-yellow-50 border-yellow-200';
+    return 'text-red-600 bg-red-50 border-red-200';
+  };
+
+  const getScoreBarColor = (score: number) => {
+    if (score >= 80) return 'bg-green-500';
+    if (score >= 60) return 'bg-yellow-500';
+    return 'bg-red-500';
+  };
+
+  if (!isLoaded) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-black dark:via-black dark:to-zinc-900 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-blue-600 dark:text-pink-500 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!isSignedIn) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-black dark:via-black dark:to-zinc-900 flex items-center justify-center px-4">
+        <div className="bg-white dark:bg-zinc-950 rounded-2xl shadow-xl border border-gray-100 dark:border-pink-500/30 p-8 max-w-md w-full text-center dark:shadow-[0_0_30px_rgba(236,72,153,0.1)]">
+          <div className="p-4 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 rounded-full w-fit mx-auto mb-6 dark:shadow-[0_0_20px_rgba(236,72,153,0.5)]">
+            <History className="w-8 h-8 text-white" />
+          </div>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-white mb-3">Sign In Required</h1>
+          <p className="text-gray-600 dark:text-gray-300 mb-6">Please sign in to view your analysis history.</p>
+          <SignInButton mode="modal">
+            <button className="px-6 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 dark:hover:from-pink-600 dark:hover:to-pink-700 dark:shadow-[0_0_10px_rgba(236,72,153,0.4)] transition-all font-medium">
+              Sign In
+            </button>
+          </SignInButton>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50 dark:from-black dark:via-black dark:to-zinc-900">
+
+
+      <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+        {/* Header */}
+        <div className="text-center mb-12">
+          <div className="flex justify-center mb-6">
+            <div className="p-4 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 rounded-full shadow-lg dark:shadow-[0_0_20px_rgba(236,72,153,0.5)]">
+              <History className="w-10 h-10 text-white" />
+            </div>
+          </div>
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-pink-400 dark:to-pink-600 bg-clip-text text-transparent mb-3">
+            Analysis History
+          </h1>
+          <p className="text-lg text-gray-600 dark:text-gray-300">
+            Review your past resume analyses and track your improvements
+          </p>
+        </div>
+
+        {/* Content */}
+        {loading ? (
+          <div className="flex flex-col items-center justify-center py-16">
+            <Loader2 className="w-10 h-10 text-blue-600 dark:text-pink-500 animate-spin mb-4" />
+            <p className="text-gray-600 dark:text-gray-300 font-medium">Loading your history...</p>
+          </div>
+        ) : error ? (
+          <div className="bg-white dark:bg-zinc-950 rounded-xl shadow-sm border border-red-200 dark:border-red-500/50 p-8 max-w-md mx-auto text-center">
+            <AlertTriangle className="w-10 h-10 text-red-500 dark:text-red-400 mx-auto mb-4" />
+            <p className="text-red-700 dark:text-red-400 font-medium">{error}</p>
+          </div>
+        ) : analyses.length === 0 ? (
+          <div className="bg-white dark:bg-zinc-950 rounded-2xl shadow-sm border border-gray-100 dark:border-pink-500/30 p-12 max-w-lg mx-auto text-center dark:shadow-[0_0_20px_rgba(236,72,153,0.1)]">
+            <FileText className="w-16 h-16 text-gray-300 dark:text-zinc-600 mx-auto mb-6" />
+            <h2 className="text-xl font-semibold text-gray-800 dark:text-white mb-3">No Analyses Yet</h2>
+            <p className="text-gray-600 dark:text-gray-400 mb-6">
+              Upload your first resume to get started with AI-powered analysis.
+            </p>
+            <Link
+              href="/"
+              className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-blue-500 to-indigo-600 dark:from-pink-500 dark:to-pink-600 text-white rounded-lg hover:from-blue-600 hover:to-indigo-700 dark:hover:from-pink-600 dark:hover:to-pink-700 dark:shadow-[0_0_10px_rgba(236,72,153,0.4)] transition-all font-medium"
+            >
+              <Zap className="w-5 h-5" />
+              Analyze Your First Resume
+            </Link>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {analyses.map((analysis) => (
+              <Link
+                key={analysis.id}
+                href={`/results?id=${analysis.id}`}
+                className="block bg-white dark:bg-zinc-950 rounded-xl shadow-sm border border-gray-100 dark:border-pink-500/30 hover:shadow-md hover:border-blue-200 dark:hover:border-pink-500 dark:hover:shadow-[0_0_15px_rgba(236,72,153,0.3)] transition-all duration-200 overflow-hidden group"
+              >
+                <div className="p-6">
+                  <div className="flex items-center justify-between">
+                    {/* Left: File info & stats */}
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3 mb-3">
+                        <div className="p-2 bg-blue-50 dark:bg-pink-900/30 rounded-lg flex-shrink-0">
+                          <FileText className="w-5 h-5 text-blue-600 dark:text-pink-500" />
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-lg font-semibold text-gray-900 dark:text-white truncate group-hover:text-blue-600 dark:group-hover:text-pink-400 transition-colors">
+                            {analysis.resumeFilename}
+                          </h3>
+                          <div className="flex items-center gap-1.5 text-sm text-gray-500 dark:text-gray-400">
+                            <Clock className="w-3.5 h-3.5" />
+                            <span>
+                              {new Date(analysis.createdAt).toLocaleDateString('en-US', {
+                                year: 'numeric',
+                                month: 'short',
+                                day: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Stats pills */}
+                      <div className="flex flex-wrap gap-2 mt-3">
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 rounded-full text-sm font-medium border border-green-200 dark:border-green-500/30">
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          {analysis.matchingKeywordCount} matched
+                        </span>
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 rounded-full text-sm font-medium border border-red-200 dark:border-red-500/30">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          {analysis.missingKeywordCount} missing
+                        </span>
+                        {analysis.atsIssueCount > 0 && (
+                          <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-400 rounded-full text-sm font-medium border border-orange-200 dark:border-orange-500/30">
+                            <AlertTriangle className="w-3.5 h-3.5" />
+                            {analysis.atsIssueCount} ATS issues
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Right: Score + arrow */}
+                    <div className="flex items-center gap-4 ml-6 flex-shrink-0">
+                      <div className="text-center">
+                        <div className={`text-3xl font-bold ${getScoreColor(analysis.matchScore).split(' ')[0]} dark:drop-shadow-[0_0_8px_rgba(236,72,153,0.5)]`}>
+                          {analysis.matchScore}%
+                        </div>
+                        <div className="w-20 h-2 bg-gray-200 dark:bg-zinc-800 rounded-full overflow-hidden mt-1.5">
+                          <div
+                            className={`h-full rounded-full ${getScoreBarColor(analysis.matchScore)} dark:bg-pink-500 dark:shadow-[0_0_10px_rgba(236,72,153,0.8)]`}
+                            style={{ width: `${analysis.matchScore}%` }}
+                          />
+                        </div>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Match Score</p>
+                      </div>
+                      <ArrowRight className="w-5 h-5 text-gray-400 dark:text-zinc-600 group-hover:text-blue-500 dark:group-hover:text-pink-500 transition-colors" />
+                    </div>
+                  </div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+```
+
+
+**Tool Call: Read file `app\layout.tsx`**
+Status: Completed
+
+```resume-analyzer_upgraded/app/layout.tsx
+import type { Metadata } from "next";
+import { Plus_Jakarta_Sans } from "next/font/google";
+import "./globals.css";
+import { ClerkProvider } from '@clerk/nextjs'
+import Navbar from "./components/Navbar";
+import { ThemeProvider } from "./components/ThemeProvider";
+
+const jakarta = Plus_Jakarta_Sans({
+  subsets: ["latin"],
+  variable: "--font-jakarta",
+});
+
+export const metadata: Metadata = {
+  title: "AI Resume Analyzer",
+  description: "Advanced agentic resume analysis using Qdrant and HuggingFace.",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <ClerkProvider>
+      <html lang="en" suppressHydrationWarning className={`${jakarta.variable} font-sans`}>
+        <body className="antialiased bg-gray-50 text-gray-900 dark:bg-black dark:text-gray-100 selection:bg-pink-500/30 selection:text-pink-200">
+          <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+            <Navbar />
+            {children}
+          </ThemeProvider>
+        </body>
+      </html>
+    </ClerkProvider>
+  )
+}
+
+
+```
+
+
+**Tool Call: Read file `middleware.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/middleware.ts
+import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server';
+
+// Define public routes (accessible without authentication)
+const isPublicRoute = createRouteMatcher([
+  '/',
+  '/api/auth/signin',
+]);
+
+export default clerkMiddleware(async(auth, req) => {
+  // Skip auth if it's a public route
+  if (isPublicRoute(req)) return;
+
+  // For protected routes, redirect to sign-in if not authenticated
+   await auth.protect();
+});
+
+export const config = {
+  matcher: [
+    // Run middleware on all routes except static files and internal paths
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.\\w+$).*)',
+  ],
+};
+
+
+
+```
+
+
+**Tool Call: Read file `docker-compose.yml`**
+Status: Completed
+
+```resume-analyzer_upgraded/docker-compose.yml
+version: '3.8'
+
+services:
+  # Redis is required for BullMQ to process background jobs
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  # Qdrant is the Vector Database for Semantic Search
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333" # REST API
+      - "6334:6334" # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  qdrant_data:
+
+```
+
+
+**Tool Call: Read file `tsconfig.server.json`**
+Status: Completed
+
+```resume-analyzer_upgraded/tsconfig.server.json
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "jsx": "react",
+    "outDir": "./dist-server",
+    "noEmit": false
+  },
+  "include": ["backend/**/*.ts", "app/lib/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+
+```
+
+
+## Assistant
+
+Excellent — I've now read the entire codebase. Here's my comprehensive breakdown of what's going on:
+
+---
+
+## 🏗️ Project Architecture Overview
+
+This is a **Phase 4** full-stack AI app with a clean two-process architecture:
+
+### Two Concurrent Processes
+
+| Process | Port | Tech | Role |
+|---|---|---|---|
+| **Frontend API** | 3000 | Next.js 15 App Router | UI, auth, PDF parsing, job queueing |
+| **Background Worker** | 3001 | Express + Socket.io + BullMQ | AI processing, vector search, WebSocket events |
+
+---
+
+## 🔄 The Full Request Lifecycle
+
+```/dev/null/lifecycle.md#L1-14
+1. User uploads PDF + JD → POST /api/analyze (Next.js)
+2. Next.js parses PDF → pushes AnalyzeJobData to Redis BullMQ queue
+3. Returns { jobId } immediately to client
+4. Frontend connects to Socket.io on port 3001 with Clerk JWT token
+5. Socket authenticates → client joins `jobId` room
+6. BullMQ Worker picks up job → runs 6-stage pipeline:
+   Stage 1 → Text cleaning (10%)
+   Stage 2 → JD Intelligence via GPT-4o + SHA-256 cache (25%)
+   Stage 3 → Resume section mapping via GPT-4o (40%)
+   Stage 4 → Section-aware semantic chunking (55%)
+   Stage 5 → HuggingFace embeddings → Qdrant vector scoring (70%)
+   Stage 6 → Master GPT-4o synthesis (85%)
+7. Saves result to MongoDB → emits `completed` with analysisId
+8. Frontend redirects to /results?id=... → fetches from GET /api/analysis/:id
+```
+
+---
+
+## 📁 File Map
+
+### Frontend (`app/`)
+- **`layout.tsx`** — Root layout: `ClerkProvider` + `ThemeProvider` + `Navbar`, using Plus Jakarta Sans font
+- **`page.tsx`** — Home page, renders `<ResumeForm />`
+- **`components/ResumeForm.tsx`** — Main form: file upload, JD text/file input, Socket.io progress listener, Clerk auth integration
+- **`components/Results.tsx`** — Rich results display: rubric breakdown, keyword chips, ATS flags, bullet rewrites, semantic gaps, priority actions
+- **`components/Navbar.tsx`** — Sticky top nav with Clerk sign in/out, history link, dark mode toggle
+- **`components/ThemeProvider.tsx` / `ThemeToggle.tsx`** — `next-themes` dark/light mode
+- **`results/page.tsx`** — Server-fetches analysis by `id` from MongoDB, renders `<Results />`
+- **`history/page.tsx`** — Lists past analyses from `/api/history`
+
+### API Routes (`app/api/`)
+- **`analyze/route.ts`** — Parses PDF, detects images, runs legacy ATS checks, enqueues BullMQ job, returns `jobId`
+- **`analysis/[id]/route.ts`** — Auth-gated MongoDB fetch by ObjectId
+- **`history/route.ts`** — Auth-gated list of all user analyses (handles legacy + new schema)
+- **`extract-text/route.ts`** — Extracts text from PDF/DOCX for pasting into the JD field
+
+### Shared Libs (`app/lib/`)
+- **`mongodb.ts`** — Singleton `MongoClient` getter
+- **`redis.ts`** — `ioredis` connection + `analyzeQueue` BullMQ `Queue` instance
+- **`openai-api.ts`** — GPT-4o wrapper using `response_format: json_object`, temp=0, max_tokens=2500
+- **`pdf-parser.ts`** — PDF text extraction (using `pdf-parse` / `pdfjs-dist`)
+- **`pdf-image-detector.ts`** — Counts embedded images to warn on ATS compatibility
+
+### Backend Worker (`backend/`)
+- **`index.ts`** — Express app, Socket.io server, Clerk JWT auth middleware (3-guard model), `initializeQdrant()`, then lazy-loads `worker.ts` after `io` is exported
+- **`worker.ts`** — The full 6-stage BullMQ worker pipeline
+- **`lib/prompts.ts`** — Three structured prompt pairs: `JD_INTEL`, `RESUME_MAP`, `MASTER_ANALYSIS`
+- **`lib/embeddings.ts`** — HuggingFace `all-MiniLM-L6-v2` via `@huggingface/inference`, produces 384-dim vectors
+- **`lib/qdrant.ts`** — Qdrant client, collection init (`resume_chunks`, cosine distance), `jobId` payload index
+
+---
+
+## 🧠 The 6-Stage Worker Pipeline
+
+| Stage | What happens | Progress |
+|---|---|---|
+| **1** | Unicode normalization, ligature fixing, whitespace collapse | 10% |
+| **2** | JD parsed by GPT-4o → `JdIntelligence` (skills, seniority, rubric weights). SHA-256 cache in `jd_intelligence` collection | 25% |
+| **3** | Resume parsed by GPT-4o → `ResumeMap` (section presence, YoE, skills, ATS warnings) | 40% |
+| **4** | Section-aware chunking: header detection from Stage 3 output, 800-char chunks | 55% |
+| **5** | Each chunk embedded with HuggingFace, upserted to Qdrant, cosine search against JD embedding, weighted scoring (`experience: 2.0`, `skills: 1.8`, `projects: 1.5`, `education: 1.0`, `summary: 0.7`) | 70% |
+| **6** | Master GPT-4o call with all prior outputs → full `AnalysisResult` JSON | 85–95% |
+
+---
+
+## 🔐 Auth Architecture
+
+- **Clerk** is used end-to-end
+- Next.js API routes use `auth()` from `@clerk/nextjs/server`
+- Socket.io uses a **3-guard model**: (A) token present check, (B) `verifyToken()` via `@clerk/backend`, (C) `job.data.clerkUserId` ownership check on `joinJobRoom`
+- `middleware.ts` protects all routes except `/` and `/api/auth/signin`
+
+---
+
+## 🗄️ Data Layer
+
+| Store | Purpose | Key Collections/Structures |
+|---|---|---|
+| **MongoDB** | Persistent storage | `analyses` (full results), `jd_intelligence` (JD cache by SHA-256 hash) |
+| **Redis** | BullMQ message broker | `analyze-resume` queue |
+| **Qdrant** | Vector DB | `resume_chunks` collection, 384-dim cosine, filtered by `jobId` |
+
+---
+
+## 🔍 Notable Design Decisions
+
+1. **JD SHA-256 Cache** — Identical job descriptions skip Stage 2's GPT-4o call entirely, saving tokens and latency
+2. **Dynamic Rubric Weights** — GPT-4o assigns weights per seniority level (intern vs senior vs executive), not hardcoded
+3. **Section-prefix Embeddings** — Chunks are prefixed with `[EXPERIENCE]` etc. before embedding to improve retrieval precision
+4. **Lazy Worker Import** — `require('./worker')` is deferred until after `io` is initialized, preventing the circular dependency where `worker.ts` imports `io` from `index.ts`
+5. **Legacy Schema Compatibility** — The `/api/history` route handles both old (`matchScore`, `atsIssues`) and new (`overallScore`, `atsAnalysis`) document shapes
+
+---
+
+What would you like to do next? Some natural next steps based on the roadmap would be:
+- **Fix known bugs** from Section 17 of the DEVELOPER.md
+- **Phase 5 implementation** (Organizational Index / Predictive Org Matching)
+- **Feature additions** (e.g., cover letter generator, PDF export of results)
+- **Performance/DX improvements** (e.g., the legacy ATS checks in `route.ts` are redundant since Stage 3 handles them more accurately)
+
+## User
+
+there are two types of matching openai keyword matching and sementic matching  with  embeddings ; i want to know the exact stages that does keyword matching
+
+## Assistant
+
+Looking at the worker pipeline, let me trace exactly which stages handle keyword matching.
+
+**Tool Call: Read file `backend\lib\prompts.ts`**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts
+export const JD_INTEL_SYSTEM_PROMPT = `You are a job description analyst. Extract structured intelligence from a job description
+to drive a resume scoring rubric. Be precise and conservative — only mark a skill as
+"mustHave" if the JD explicitly states it as required, not just preferred.
+
+Return ONLY valid JSON matching the schema. No preamble, no explanation.`;
+
+export const JD_INTEL_USER_PROMPT = `Analyze this job description and return the following JSON:
+
+{
+  "roleTitle": string,
+  "seniorityLevel": "intern" | "junior" | "mid" | "senior" | "lead" | "executive",
+  "seniorityConfidence": "high" | "medium" | "low",
+  "senioritySignals": [string],         // phrases that indicated seniority e.g. "3-5 years required"
+  "yoeMin": number | null,              // minimum years of experience required (null if not stated)
+  "yoeMax": number | null,
+  "yoeExplicit": boolean,               // true if JD literally states a year range
+  "mustHaveSkills": [string],           // skills explicitly required
+  "niceToHaveSkills": [string],         // skills listed as preferred/bonus/plus
+  "educationRequired": "none" | "any" | "bachelors" | "masters" | "phd",
+  "educationFlexible": boolean,         // true if JD says "or equivalent experience"
+  "industryDomain": string,             // e.g. "fintech", "healthtech", "enterprise SaaS"
+  "softSkillsRequired": [string],       // e.g. ["communication", "cross-functional collaboration"]
+  "leadershipRequired": boolean,
+  "leadershipSignals": [string],        // phrases like "manage a team", "mentor juniors"
+  "remotePolicy": "remote" | "hybrid" | "onsite" | "unspecified",
+  "rubricWeights": {
+    "technicalSkills": number,          // must sum to 100
+    "yearsOfExperience": number,
+    "education": number,
+    "keywordCoverage": number,
+    "softSkillsAndLeadership": number
+  },
+  "rubricRationale": string             // 1-sentence explanation of why weights were chosen
+}
+
+Rubric weight rules you MUST follow:
+- intern/junior: technicalSkills 50, yearsOfExperience 5, education 10, keywordCoverage 25, softSkillsAndLeadership 10
+- mid: technicalSkills 40, yearsOfExperience 20, education 10, keywordCoverage 20, softSkillsAndLeadership 10
+- senior: technicalSkills 35, yearsOfExperience 25, education 10, keywordCoverage 15, softSkillsAndLeadership 15
+- lead: technicalSkills 30, yearsOfExperience 20, education 5, keywordCoverage 15, softSkillsAndLeadership 30
+- executive: technicalSkills 15, yearsOfExperience 15, education 5, keywordCoverage 10, softSkillsAndLeadership 55
+- If seniorityLevel is ambiguous, default to "mid" weights.
+
+---
+JOB DESCRIPTION:
+{{JD_TEXT}}`;
+
+export const RESUME_MAP_SYSTEM_PROMPT = `You are a resume parser. Your job is to identify the structural sections of a resume and
+extract structured facts from each. You must handle all common section name variations —
+"Work History", "Professional Experience", "Career Summary" are all valid names for
+standard ATS sections.
+
+Do NOT infer or guess information not present. If a field is absent, return null or [].
+Return ONLY valid JSON. No preamble, no markdown, no explanation.`;
+
+export const RESUME_MAP_USER_PROMPT = `Parse this resume and return the following JSON:
+
+{
+  "sections": {
+    "contactInfo":     { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null, "hasEmail": boolean, "hasPhone": boolean, "hasLinkedIn": boolean, "hasLocation": boolean },
+    "summary":         { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "experience":      { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "education":       { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "skills":          { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "projects":        { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "certifications":  { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "achievements":    { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null }
+  },
+  "extractedFacts": {
+    "fullName": string | null,
+    "totalYoe": number | null,              // summed from all experience date ranges
+    "yoeCalculationNote": string | null,    // e.g. "3 roles: 2019-2021, 2021-2023, 2023-present"
+    "highestEducation": "highschool" | "bachelors" | "masters" | "phd" | "unspecified",
+    "educationField": string | null,        // e.g. "Computer Science"
+    "allSkillsMentioned": [string],         // every technical skill found anywhere in resume
+    "programmingLanguages": [string],
+    "frameworks": [string],
+    "tools": [string],
+    "softSkillsMentioned": [string],
+    "companiesWorkedAt": [string],
+    "currentOrMostRecentTitle": string | null,
+    "senioritySignal": "intern" | "junior" | "mid" | "senior" | "lead" | "executive",
+    "hasQuantifiedAchievements": boolean,   // true if any bullet has numbers/percentages/metrics
+    "quantifiedAchievementCount": number,
+    "avgBulletLength": "short" | "medium" | "long",  // short <8 words, long >20 words
+    "usesFirstPerson": boolean,             // true if resume uses "I", "my", "me"
+    "tenseConsistency": "consistent" | "mixed" | "unknown"
+  },
+  "atsWarnings": [
+    {
+      "type": "missingSectionRequired" | "missingSectionRecommended" | "formattingIssue" | "contentIssue",
+      "message": string,
+      "severity": "critical" | "warning" | "info"
+    }
+  ]
+}
+
+---
+RESUME TEXT:
+{{CLEANED_RESUME_TEXT}}`;
+
+export const MASTER_ANALYSIS_SYSTEM_PROMPT = `You are an expert resume analyst and career coach with deep knowledge of ATS systems,
+hiring processes, and resume best practices across industries.
+
+You will receive:
+1. A cleaned resume text
+2. A job description
+3. Pre-extracted JD intelligence (seniority, required skills, dynamic rubric weights)
+4. Pre-extracted resume facts (YoE, skills, section map)
+5. Semantic similarity gaps (sections where resume meaning doesn't match JD)
+
+Your job is to produce a comprehensive, actionable analysis. Be specific — generic advice
+like "add more skills" is useless. Reference actual content from the resume and JD.
+
+CRITICAL RULES:
+- Use the provided rubricWeights EXACTLY. Do not use a hardcoded rubric.
+- Score each rubric category independently, then compute the weighted total.
+- If yoeExplicit is false in JD intel, do not heavily penalise the candidate for YoE.
+- Detect seniority mismatch: if resume senioritySignal != JD seniorityLevel, flag it.
+- All bullet rewrites must start with a strong action verb and include a metric where possible.
+- Return ONLY valid JSON. No preamble, no markdown fences.`;
+
+export const MASTER_ANALYSIS_USER_PROMPT = `Produce a full resume analysis using the inputs below.
+
+Return this exact JSON schema:
+
+{
+  "overallScore": number,                 // 0-100, weighted sum of rubric scores
+  "scoreInterpretation": "strong" | "moderate" | "weak",
+  "rubricBreakdown": {
+    "technicalSkills":        { "score": number, "maxScore": number, "rationale": string },
+    "yearsOfExperience":      { "score": number, "maxScore": number, "rationale": string },
+    "education":              { "score": number, "maxScore": number, "rationale": string },
+    "keywordCoverage":        { "score": number, "maxScore": number, "rationale": string },
+    "softSkillsAndLeadership":{ "score": number, "maxScore": number, "rationale": string }
+  },
+  "seniorityMismatch": {
+    "detected": boolean,
+    "resumeLevel": string,
+    "jdLevel": string,
+    "message": string | null
+  },
+  "keywordAnalysis": {
+    "matchedMustHave":    [string],        // must-have JD skills found in resume
+    "missingMustHave":    [string],        // must-have JD skills NOT found
+    "matchedNiceToHave":  [string],
+    "missingNiceToHave":  [string],
+    "unexpectedStrengths":[string]         // strong skills in resume not in JD — candidate should highlight these if relevant
+  },
+  "atsAnalysis": {
+    "overallAtsScore": number,             // 0-100
+    "sectionFlags": [
+      { "section": string, "status": "present" | "missing" | "weak", "severity": "critical"|"warning"|"info", "advice": string }
+    ],
+    "formattingFlags": [string]            // e.g. "Uses tables — may break ATS parsers"
+  },
+  "bulletFeedback": [
+    {
+      "original": string,                  // exact bullet from resume
+      "issue": string,                     // what's wrong: weak verb, no metric, too long, etc.
+      "rewritten": string,                 // improved version
+      "improvementType": "actionVerb" | "addMetric" | "clarity" | "relevance"
+    }
+  ],
+  "grammarAndStyle": {
+    "issues": [
+      { "text": string, "issue": string, "suggestion": string }
+    ],
+    "toneAssessment": string,
+    "readabilityGrade": number,
+    "usesFirstPerson": boolean,
+    "tenseConsistency": string
+  },
+  "semanticInsights": {
+    "strongestSections": [string],         // section names where semantic score was highest
+    "weakestSections":   [string],         // section names where semantic score was lowest
+    "meaningGaps": [
+      { "area": string, "gap": string, "suggestion": string }
+    ]
+  },
+  "topPriorityActions": [                  // max 5, ordered by impact
+    { "priority": number, "action": string, "impact": "high"|"medium"|"low", "effort": "high"|"medium"|"low" }
+  ],
+  "summaryVerdict": string                 // 2-3 sentence honest assessment for the candidate
+}
+
+---
+RESUME TEXT (FULL):
+{{CLEANED_RESUME_TEXT}}
+
+---
+JOB DESCRIPTION:
+{{JD_TEXT}}
+
+---
+JD INTELLIGENCE (from prior analysis):
+{{JD_INTEL_JSON}}
+
+---
+RESUME FACTS (from prior parsing):
+{{RESUME_FACTS_JSON}}
+
+---
+SEMANTIC GAPS (sections with low vector similarity):
+{{SEMANTIC_GAPS_JSON}}
+
+---
+RUBRIC WEIGHTS TO USE:
+technicalSkills: {{W_SKILLS}}, yearsOfExperience: {{W_YOE}}, 
+education: {{W_EDU}}, keywordCoverage: {{W_KEYWORDS}}, 
+softSkillsAndLeadership: {{W_SOFT}}`;
+
+```
+
+
+**Tool Call: Read file `backend\worker.ts` (lines 1-80)**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/worker.ts
+import { Worker, Job } from 'bullmq';
+import { v4 as uuidv4 } from 'uuid';
+import crypto from 'crypto';
+import { redisConnection } from '../app/lib/redis';
+import { callOpenAIApi } from '../app/lib/openai-api';
+import { getDb } from '../app/lib/mongodb';
+import { generateEmbedding } from './lib/embeddings';
+import { qdrantClient, COLLECTION_NAME } from './lib/qdrant';
+import { io } from './index';
+import { 
+  JD_INTEL_SYSTEM_PROMPT, JD_INTEL_USER_PROMPT, 
+  RESUME_MAP_SYSTEM_PROMPT, RESUME_MAP_USER_PROMPT,
+  MASTER_ANALYSIS_SYSTEM_PROMPT, MASTER_ANALYSIS_USER_PROMPT 
+} from './lib/prompts';
+
+interface AnalyzeJobData {
+  resumeText: string;
+  jobDescription: string;
+  clerkUserId: string;
+  resumeFilename: string;
+  atsIssues: string[]; // (Legacy, now handled by Stage 3)
+}
+
+function cleanText(text: string): string {
+  let cleaned = text;
+  // Replace Unicode ligatures
+  cleaned = cleaned.replace(/ﬁ/g, 'fi').replace(/ﬂ/g, 'fl').replace(/ﬀ/g, 'ff');
+  // Strip soft hyphens
+  cleaned = cleaned.replace(/\u00AD/g, '');
+  // Normalize bullets
+  cleaned = cleaned.replace(/[•▪◦–*]/g, '-');
+  // Normalize whitespace (tabs to spaces)
+  cleaned = cleaned.replace(/\t/g, ' ');
+  // Collapse >2 newlines to 2 newlines
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+  return cleaned.trim();
+}
+
+export const worker = new Worker<AnalyzeJobData>(
+  'analyze-resume',
+  async (job: Job) => {
+    console.log(`[Worker] Started processing job: ${job.id}`);
+    
+    const {
+      resumeText,
+      jobDescription,
+      clerkUserId,
+      resumeFilename,
+    } = job.data;
+    
+    // ==========================================
+    // STAGE 1: Full Text Extraction & Cleaning
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 1/6: Cleaning document text...', percent: 10 });
+    const cleanedResume = cleanText(resumeText);
+
+    // ==========================================
+    // STAGE 2: JD Intelligence Extraction
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 2/6: Extracting Job Description intelligence...', percent: 25 });
+    
+    const db = await getDb();
+    const jdHash = crypto.createHash('sha256').update(jobDescription.toLowerCase().trim()).digest('hex');
+    let jdIntel;
+    
+    const cachedIntel = await db.collection('jd_intelligence').findOne({ jdHash });
+    if (cachedIntel) {
+      console.log(`[Worker] Using cached JD Intelligence for hash ${jdHash}`);
+      jdIntel = cachedIntel.data;
+    } else {
+      const jdPrompt = JD_INTEL_USER_PROMPT.replace('{{JD_TEXT}}', jobDescription);
+      const { response, error } = await callOpenAIApi(jdPrompt, { systemPrompt: JD_INTEL_SYSTEM_PROMPT });
+      if (error) throw new Error("JD Intelligence Extraction failed: " + error);
+      jdIntel = JSON.parse(response);
+      await db.collection('jd_intelligence').insertOne({ jdHash, data: jdIntel, createdAt: new Date() });
+    }
+
+    // ==========================================
+    // STAGE 3: Resume Section Map & Facts
+    // ==========================================
+
+```
+
+
+## Assistant
+
+Here's the precise answer:
+
+---
+
+## Keyword Matching — Exactly Two Stages Involved
+
+### Stage 2 — *Produces* the keyword targets
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts#L20-22
+  "mustHaveSkills": [string],           // skills explicitly required
+  "niceToHaveSkills": [string],         // skills listed as preferred/bonus/plus
+```
+
+Stage 2 sends the raw JD text to GPT-4o and gets back two lists: `mustHaveSkills` and `niceToHaveSkills`. **No matching happens here yet** — this is purely extraction from the JD side. The result is stored in `jdIntel`.
+
+---
+
+### Stage 6 — *Does* the actual keyword matching
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts#L148-154
+  "keywordAnalysis": {
+    "matchedMustHave":    [string],        // must-have JD skills found in resume
+    "missingMustHave":    [string],        // must-have JD skills NOT found
+    "matchedNiceToHave":  [string],
+    "missingNiceToHave":  [string],
+    "unexpectedStrengths":[string]         // strong skills in resume not in JD
+  },
+```
+
+Stage 6's master prompt feeds GPT-4o **all four inputs at once** — the full resume text, the JD text, the `jdIntel` from Stage 2 (which has the keyword lists), and the `resumeFacts` from Stage 3 (which has `allSkillsMentioned`). GPT-4o then cross-references them and returns the `keywordAnalysis` object with the matched/missing splits.
+
+```resume-analyzer_upgraded/backend/worker.ts#L153-162
+    const masterPrompt = MASTER_ANALYSIS_USER_PROMPT
+      .replace('{{CLEANED_RESUME_TEXT}}', cleanedResume)
+      .replace('{{JD_TEXT}}', jobDescription)
+      .replace('{{JD_INTEL_JSON}}', JSON.stringify(jdIntel))      // ← has mustHaveSkills
+      .replace('{{RESUME_FACTS_JSON}}', JSON.stringify(resumeMap)) // ← has allSkillsMentioned
+      .replace('{{SEMANTIC_GAPS_JSON}}', JSON.stringify(semanticGaps))
+```
+
+---
+
+### Key thing to understand: it's **LLM-delegated matching, not algorithmic**
+
+There is **no `string.includes()` or regex loop** anywhere in the codebase doing keyword matching. The entire compare-and-classify operation — "is React from the JD found in the resume?" — is delegated entirely to GPT-4o in Stage 6. GPT-4o handles synonyms, casing, abbreviations (e.g. "JS" = "JavaScript"), and contextual relevance automatically because it's reading the full texts, not just comparing string lists.
+
+---
+
+### Summary
+
+| Stage | Role in keyword matching |
+|---|---|
+| **Stage 2** | Extracts `mustHaveSkills` + `niceToHaveSkills` from the JD (the *target* list) |
+| **Stage 3** | Extracts `allSkillsMentioned` from the resume (the *source* list, fed into Stage 6) |
+| **Stage 6** | Performs the actual cross-referencing and produces `matchedMustHave`, `missingMustHave`, etc. |
+| **Stage 5** | Entirely semantic (embeddings + Qdrant) — has nothing to do with keyword matching |
+
+## User
+
+explain stage 3
+
+## Assistant
+
+Looking at Stage 3 in detail across both the worker and the prompt.
+
+**Tool Call: Read file `backend\worker.ts` (lines 80-130)**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/worker.ts
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 3/6: Mapping resume sections...', percent: 40 });
+    
+    const mapPrompt = RESUME_MAP_USER_PROMPT.replace('{{CLEANED_RESUME_TEXT}}', cleanedResume);
+    const mapRes = await callOpenAIApi(mapPrompt, { systemPrompt: RESUME_MAP_SYSTEM_PROMPT });
+    if (mapRes.error) throw new Error("Resume Mapping failed: " + mapRes.error);
+    const resumeMap = JSON.parse(mapRes.response);
+
+    // ==========================================
+    // STAGE 4: Section-Aware Chunking
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 4/6: Chunking text semantically...', percent: 55 });
+    
+    const lines = cleanedResume.split('\n');
+    const sections: {name: string, text: string}[] = [];
+    let currentSectionName = 'summary'; // default
+    let currentBlock: string[] = [];
+
+    // Extract raw headers from Stage 3 output
+    const rawHeaders: {key: string, normalized: string}[] = [];
+    if (resumeMap.sections) {
+      for (const [key, val] of Object.entries(resumeMap.sections)) {
+        const sectionData = val as any;
+        if (sectionData.present && sectionData.detectedHeaderRawText) {
+          rawHeaders.push({
+            key,
+            normalized: sectionData.detectedHeaderRawText.toLowerCase().replace(/\s+/g, ' ').trim()
+          });
+        }
+      }
+    }
+
+    for (const line of lines) {
+      const normLine = line.toLowerCase().replace(/\s+/g, ' ').trim();
+      const isShort = normLine.split(' ').length < 6;
+      const isBullet = normLine.startsWith('-');
+      
+      let matchedHeader = null;
+      if (isShort && !isBullet && normLine.length > 0) {
+        matchedHeader = rawHeaders.find(h => h.normalized === normLine);
+      }
+
+      if (matchedHeader) {
+        if (currentBlock.length > 0) {
+          sections.push({ name: currentSectionName, text: currentBlock.join('\n') });
+          currentBlock = [];
+        }
+        currentSectionName = matchedHeader.key;
+      } else {
+        currentBlock.push(line);
+      }
+
+```
+
+
+## Assistant
+
+Here's the full breakdown:
+
+---
+
+## Stage 3 — Resume Section Mapping & Fact Extraction
+
+### What it does in one sentence
+It sends the cleaned resume text to GPT-4o and gets back a **structured map of the entire resume** — what sections exist, where they are, and every extractable fact from them.
+
+---
+
+### The Code — Just 4 Lines
+
+```resume-analyzer_upgraded/backend/worker.ts#L82-87
+    const mapPrompt = RESUME_MAP_USER_PROMPT.replace('{{CLEANED_RESUME_TEXT}}', cleanedResume);
+    const mapRes = await callOpenAIApi(mapPrompt, { systemPrompt: RESUME_MAP_SYSTEM_PROMPT });
+    if (mapRes.error) throw new Error("Resume Mapping failed: " + mapRes.error);
+    const resumeMap = JSON.parse(mapRes.response);
+```
+
+Stage 3 itself is tiny — it's just one GPT-4o call. All the intelligence is in the prompt schema it returns.
+
+---
+
+### The Output — Two Top-Level Objects
+
+**1. `sections`** — structural map of 8 named sections:
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts#L61-70
+    "contactInfo":     { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null, "hasEmail": boolean, "hasPhone": boolean, "hasLinkedIn": boolean, "hasLocation": boolean },
+    "summary":         { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "experience":      { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "education":       { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "skills":          { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "projects":        { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "certifications":  { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "achievements":    { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null }
+```
+
+Notice each section has **two header fields**:
+- `detectedHeaderName` — the canonical name GPT-4o recognized (e.g. `"experience"`)
+- `detectedHeaderRawText` — the **exact text as it appears in the PDF** (e.g. `"Work History"`, `"Professional Experience"`, `"Career Summary"`)
+
+The `detectedHeaderRawText` is critically important — Stage 4 uses it for **exact-match header detection** to split the resume into sections.
+
+**2. `extractedFacts`** — every quantifiable fact from the resume:
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts#L73-93
+    "fullName": string | null,
+    "totalYoe": number | null,
+    "yoeCalculationNote": string | null,
+    "highestEducation": "highschool" | "bachelors" | "masters" | "phd" | "unspecified",
+    "educationField": string | null,
+    "allSkillsMentioned": [string],
+    "programmingLanguages": [string],
+    "frameworks": [string],
+    "tools": [string],
+    "softSkillsMentioned": [string],
+    "companiesWorkedAt": [string],
+    "currentOrMostRecentTitle": string | null,
+    "senioritySignal": "intern" | "junior" | "mid" | "senior" | "lead" | "executive",
+    "hasQuantifiedAchievements": boolean,
+    "quantifiedAchievementCount": number,
+    "avgBulletLength": "short" | "medium" | "long",
+    "usesFirstPerson": boolean,
+    "tenseConsistency": "consistent" | "mixed" | "unknown"
+```
+
+**3. `atsWarnings`** — pre-flagged issues GPT-4o spots during parsing:
+
+```resume-analyzer_upgraded/backend/lib/prompts.ts#L95-101
+    {
+      "type": "missingSectionRequired" | "missingSectionRecommended" | "formattingIssue" | "contentIssue",
+      "message": string,
+      "severity": "critical" | "warning" | "info"
+    }
+```
+
+---
+
+### Where Each Output Goes Downstream
+
+| Stage 3 output | Used by | Purpose |
+|---|---|---|
+| `sections[x].detectedHeaderRawText` | **Stage 4** | Exact-match header detection to physically split the resume text into labeled blocks |
+| `extractedFacts` (whole object) | **Stage 6** | Fed as `{{RESUME_FACTS_JSON}}` into the master prompt so GPT-4o knows YoE, skills, seniority signal without re-reading the full text |
+| `extractedFacts.allSkillsMentioned` | **Stage 6** | The "source list" for keyword cross-referencing against Stage 2's `mustHaveSkills` |
+| `extractedFacts.senioritySignal` | **Stage 6** | Compared against `jdIntel.seniorityLevel` to detect seniority mismatch |
+| `atsWarnings` | **Final result** | Saved directly into `analysisResult.atsWarnings` in MongoDB |
+
+---
+
+### The Clever Part — Why `detectedHeaderRawText` Matters
+
+This is the most important design decision in Stage 3. Real resumes use wildly different section names:
+
+```/dev/null/example.md#L1-6
+"Work History"         → maps to → experience
+"Professional Experience" → maps to → experience  
+"Career Summary"       → maps to → summary
+"Core Competencies"    → maps to → skills
+"Technical Proficiencies" → maps to → skills
+```
+
+Without Stage 3, Stage 4 would have to guess these headers using regex patterns — which breaks constantly. Instead, GPT-4o reads the actual resume in Stage 3 and tells Stage 4 *exactly* what text string to look for when splitting. Stage 4 then does a simple normalized string equality check:
+
+```resume-analyzer_upgraded/backend/worker.ts#L103-107
+        if (sectionData.present && sectionData.detectedHeaderRawText) {
+          rawHeaders.push({
+            key,
+            normalized: sectionData.detectedHeaderRawText.toLowerCase().replace(/\s+/g, ' ').trim()
+          });
+        }
+```
+
+So Stage 3 is essentially the **intelligence layer that makes Stage 4 possible**.
+
+## User
+
+can you make a example demo of stage 1 to stage 6 output json    just for understanding no real resume .
+
+## Assistant
+
+Let me trace through the exact shapes expected at each stage boundary before writing the demo.
+
+**Tool Call: Read file `backend\worker.ts` (lines 130-230)**
+Status: Completed
+
+```resume-analyzer_upgraded/backend/worker.ts
+      }
+    }
+    if (currentBlock.length > 0) {
+      sections.push({ name: currentSectionName, text: currentBlock.join('\n') });
+    }
+
+    const chunks: {section: string, text: string}[] = [];
+    for (const sec of sections) {
+      // Split into sentences (simple regex ending in punctuation followed by space and Capital)
+      const sentences = sec.text.match(/[^.!?]+[.!?]+(?=\s+[A-Z]|$)|[^.!?]+$/g) || [sec.text];
+      let currentChunk = '';
+      for (const sentence of sentences) {
+        if ((currentChunk + sentence).length > 800) { // approx 150-200 tokens
+          if (currentChunk.trim().length > 20) {
+            chunks.push({ section: sec.name, text: currentChunk.trim() });
+          }
+          currentChunk = sentence;
+        } else {
+          currentChunk += ' ' + sentence;
+        }
+      }
+      if (currentChunk.trim().length > 20) {
+        chunks.push({ section: sec.name, text: currentChunk.trim() });
+      }
+    }
+
+    // ==========================================
+    // STAGE 5: Semantic Vector Scoring
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 5/6: Vector similarity scoring...', percent: 70 });
+    
+    let semanticScore = 0;
+    const semanticGaps: any[] = [];
+    
+    try {
+      const jdEmbedding = await generateEmbedding(jobDescription.slice(0, 8000));
+      const points = [];
+      
+      for (const chunk of chunks) {
+        // Prepend metadata!
+        const prefix = `[${chunk.section.toUpperCase()}] `;
+        const embedding = await generateEmbedding(prefix + chunk.text);
+        points.push({
+          id: uuidv4(),
+          vector: embedding,
+          payload: { jobId: job.id, clerkUserId, text: chunk.text, section: chunk.section }
+        });
+      }
+
+      if (points.length > 0) {
+        await qdrantClient.upsert(COLLECTION_NAME, { wait: true, points });
+
+        const searchResult = await qdrantClient.search(COLLECTION_NAME, {
+          vector: jdEmbedding,
+          limit: 20, // Fetch up to 20 to get average coverage
+          filter: { must: [{ key: "jobId", match: { value: job.id } }] }
+        });
+
+        // Calculate weighted semantic score
+        const sectionWeights: Record<string, number> = {
+          experience: 2.0, skills: 1.8, projects: 1.5, education: 1.0, summary: 0.7
+        };
+
+        let totalWeightedScore = 0;
+        let totalWeight = 0;
+        const sectionScores: Record<string, { sum: number, count: number }> = {};
+
+        for (const hit of searchResult) {
+          const sec = hit.payload?.section as string || 'unknown';
+          const weight = sectionWeights[sec] || 0.5;
+          totalWeightedScore += hit.score * weight;
+          totalWeight += weight;
+          
+          if (!sectionScores[sec]) sectionScores[sec] = { sum: 0, count: 0 };
+          sectionScores[sec].sum += hit.score;
+          sectionScores[sec].count++;
+        }
+
+        if (totalWeight > 0) {
+          semanticScore = Math.round((totalWeightedScore / totalWeight) * 100);
+          if (semanticScore > 100) semanticScore = 100;
+        }
+
+        // Detect Gaps
+        for (const [sec, data] of Object.entries(sectionScores)) {
+          const avg = (data.sum / data.count) * 100;
+          if ((sec === 'experience' && avg < 65) || (sec === 'skills' && avg < 60)) {
+            semanticGaps.push({ section: sec, score: Math.round(avg) });
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`[Worker] Semantic search failed for job ${job.id}:`, err);
+    }
+
+    // ==========================================
+    // STAGE 6: Master LLM Analysis
+    // ==========================================
+    io.to(job.id!).emit('progress', { step: 'Stage 6/6: Generating master analysis...', percent: 85 });
+    
+    // Construct final dynamic prompt
+
+```
+
+
+**Tool Call: Read file `app\components\Results.tsx` (lines 8-63)**
+Status: Completed
+
+```resume-analyzer_upgraded/app/components/Results.tsx
+export interface AnalysisResult {
+  overallScore: number;
+  scoreInterpretation: 'strong' | 'moderate' | 'weak';
+  rubricBreakdown: {
+    technicalSkills: { score: number; maxScore: number; rationale: string };
+    yearsOfExperience: { score: number; maxScore: number; rationale: string };
+    education: { score: number; maxScore: number; rationale: string };
+    keywordCoverage: { score: number; maxScore: number; rationale: string };
+    softSkillsAndLeadership: { score: number; maxScore: number; rationale: string };
+  };
+  seniorityMismatch: {
+    detected: boolean;
+    resumeLevel: string;
+    jdLevel: string;
+    message: string | null;
+  };
+  keywordAnalysis: {
+    matchedMustHave: string[];
+    missingMustHave: string[];
+    matchedNiceToHave: string[];
+    missingNiceToHave: string[];
+    unexpectedStrengths: string[];
+  };
+  atsAnalysis: {
+    overallAtsScore: number;
+    sectionFlags: Array<{ section: string; status: string; severity: string; advice: string }>;
+    formattingFlags: string[];
+  };
+  bulletFeedback: Array<{
+    original: string;
+    issue: string;
+    rewritten: string;
+    improvementType: string;
+  }>;
+  grammarAndStyle: {
+    issues: Array<{ text: string; issue: string; suggestion: string }>;
+    toneAssessment: string;
+    readabilityGrade: number;
+    usesFirstPerson: boolean;
+    tenseConsistency: string;
+  };
+  semanticInsights: {
+    strongestSections: string[];
+    weakestSections: string[];
+    meaningGaps: Array<{ area: string; gap: string; suggestion: string }>;
+  };
+  topPriorityActions: Array<{
+    priority: number;
+    action: string;
+    impact: 'high' | 'medium' | 'low';
+    effort: 'high' | 'medium' | 'low';
+  }>;
+  summaryVerdict: string;
+  semanticScore: number;
+  semanticGaps: Array<{ section: string; score: number }>;
+}
+
+```
+
+
+## Assistant
+
+Here's the full end-to-end demo. The fictional candidate is **Alex Chen**, a mid-level React developer applying for a **Senior Frontend Engineer** role.
+
+---
+
+## The Fictional Inputs
+
+**Resume (raw PDF text):**
+```/dev/null/input-resume.txt#L1-22
+Alex Chen
+alex.chen@email.com | linkedin.com/in/alexchen | San Francisco, CA
+
+Career Summary
+Passionate frontend developer with experience building web apps using modern JavaScript frameworks.
+
+Work History
+Software Engineer at Acme Corp (2021 - present)
+- Built user interfaces using React and JavaScript
+- Worked with REST APIs
+- Helped team with code reviews
+
+Junior Developer at StartupXYZ (2019 - 2021)
+- Made websites using HTML and CSS
+- Did some React work
+
+Core Competencies
+React, JavaScript, HTML, CSS, Git, REST APIs
+
+Education
+Bachelor of Science, Computer Science — State University, 2019
+```
+
+**Job Description:**
+```/dev/null/input-jd.txt#L1-14
+Senior Frontend Engineer — FinanceFlow Inc.
+
+We are looking for a Senior Frontend Engineer with 5+ years of experience.
+Requirements:
+- Expert-level React and TypeScript (required)
+- Experience with Redux or Zustand for state management (required)
+- Node.js and REST API integration (required)
+- AWS or cloud deployment experience (required)
+- GraphQL knowledge (preferred)
+- Docker (preferred)
+
+You will lead a team of 3 junior engineers, conduct technical interviews,
+and own frontend architecture decisions. Bachelor's degree required.
+```
+
+---
+
+## Stage 1 — Text Cleaning Output
+
+**What happened:** `cleanText()` ran — ligatures replaced, soft hyphens stripped, bullets normalized, whitespace collapsed. On this clean fictional resume almost nothing changes, but here's the normalized state that all later stages receive:
+
+```/dev/null/stage1-output.txt#L1-22
+Alex Chen
+alex.chen@email.com | linkedin.com/in/alexchen | San Francisco, CA
+
+Career Summary
+Passionate frontend developer with experience building web apps using modern JavaScript frameworks.
+
+Work History
+Software Engineer at Acme Corp (2021 - present)
+- Built user interfaces using React and JavaScript
+- Worked with REST APIs
+- Helped team with code reviews
+
+Junior Developer at StartupXYZ (2019 - 2021)
+- Made websites using HTML and CSS
+- Did some React work
+
+Core Competencies
+React, JavaScript, HTML, CSS, Git, REST APIs
+
+Education
+Bachelor of Science, Computer Science - State University, 2019
+```
+
+The bullet `•` → `-` normalization is the main visible change. This string is now `cleanedResume` and is passed into every stage after this.
+
+---
+
+## Stage 2 — JD Intelligence Output (`jdIntel`)
+
+**What happened:** GPT-4o read the job description and returned this structured object. This is what gets stored in the `jd_intelligence` MongoDB collection (keyed by SHA-256 of the JD text).
+
+```/dev/null/stage2-output.json#L1-44
+{
+  "roleTitle": "Senior Frontend Engineer",
+  "seniorityLevel": "senior",
+  "seniorityConfidence": "high",
+  "senioritySignals": ["5+ years of experience", "lead a team of 3 junior engineers", "own frontend architecture decisions"],
+  "yoeMin": 5,
+  "yoeMax": null,
+  "yoeExplicit": true,
+  "mustHaveSkills": ["React", "TypeScript", "Redux", "Zustand", "Node.js", "REST APIs", "AWS"],
+  "niceToHaveSkills": ["GraphQL", "Docker"],
+  "educationRequired": "bachelors",
+  "educationFlexible": false,
+  "industryDomain": "fintech",
+  "softSkillsRequired": ["leadership", "technical interviewing", "cross-functional collaboration"],
+  "leadershipRequired": true,
+  "leadershipSignals": ["lead a team of 3 junior engineers", "conduct technical interviews", "own frontend architecture decisions"],
+  "remotePolicy": "unspecified",
+  "rubricWeights": {
+    "technicalSkills": 35,
+    "yearsOfExperience": 25,
+    "education": 10,
+    "keywordCoverage": 15,
+    "softSkillsAndLeadership": 15
+  },
+  "rubricRationale": "Senior role with mandatory leadership, so experience and soft skills are weighted heavily alongside technical depth."
+}
+```
+
+**Key things to note:**
+- `seniorityLevel: "senior"` → triggers the `35/25/10/15/15` rubric weights
+- `mustHaveSkills` has 7 items — Alex's resume will be checked against all of these in Stage 6
+- `leadershipRequired: true` — Alex's resume has no leadership signals, which will hurt Stage 6 scoring
+
+---
+
+## Stage 3 — Resume Map Output (`resumeMap`)
+
+**What happened:** GPT-4o read `cleanedResume` and returned this. Notice it correctly identified `"Work History"` and `"Core Competencies"` as non-standard section names.
+
+```/dev/null/stage3-output.json#L1-65
+{
+  "sections": {
+    "contactInfo": {
+      "present": true,
+      "detectedHeaderName": "contactInfo",
+      "detectedHeaderRawText": null,
+      "hasEmail": true,
+      "hasPhone": false,
+      "hasLinkedIn": true,
+      "hasLocation": true
+    },
+    "summary": {
+      "present": true,
+      "detectedHeaderName": "summary",
+      "detectedHeaderRawText": "Career Summary"
+    },
+    "experience": {
+      "present": true,
+      "detectedHeaderName": "experience",
+      "detectedHeaderRawText": "Work History"
+    },
+    "education": {
+      "present": true,
+      "detectedHeaderName": "education",
+      "detectedHeaderRawText": "Education"
+    },
+    "skills": {
+      "present": true,
+      "detectedHeaderName": "skills",
+      "detectedHeaderRawText": "Core Competencies"
+    },
+    "projects":       { "present": false, "detectedHeaderName": null, "detectedHeaderRawText": null },
+    "certifications": { "present": false, "detectedHeaderName": null, "detectedHeaderRawText": null },
+    "achievements":   { "present": false, "detectedHeaderName": null, "detectedHeaderRawText": null }
+  },
+  "extractedFacts": {
+    "fullName": "Alex Chen",
+    "totalYoe": 5,
+    "yoeCalculationNote": "2 roles: 2019-2021 (2 yrs) + 2021-present (3 yrs) = ~5 yrs",
+    "highestEducation": "bachelors",
+    "educationField": "Computer Science",
+    "allSkillsMentioned": ["React", "JavaScript", "HTML", "CSS", "Git", "REST APIs"],
+    "programmingLanguages": ["JavaScript"],
+    "frameworks": ["React"],
+    "tools": ["Git"],
+    "softSkillsMentioned": ["code reviews"],
+    "companiesWorkedAt": ["Acme Corp", "StartupXYZ"],
+    "currentOrMostRecentTitle": "Software Engineer",
+    "senioritySignal": "mid",
+    "hasQuantifiedAchievements": false,
+    "quantifiedAchievementCount": 0,
+    "avgBulletLength": "short",
+    "usesFirstPerson": false,
+    "tenseConsistency": "mixed"
+  },
+  "atsWarnings": [
+    {
+      "type": "missingSectionRecommended",
+      "message": "No Projects section found. Adding a projects section can significantly strengthen a frontend engineering resume.",
+      "severity": "warning"
+    },
+    {
+      "type": "contentIssue",
+      "message": "No quantified achievements detected. Bullets lack metrics (e.g. improved load time by 40%).",
+      "severity": "warning"
+    },
+    {
+      "type": "contentIssue",
+      "message": "Phone number missing from contact info.",
+      "severity": "info"
+    }
+  ]
+}
+```
+
+**Key things to note:**
+- `detectedHeaderRawText: "Work History"` and `"Core Competencies"` — these exact strings are handed to Stage 4 as split markers
+- `senioritySignal: "mid"` vs `jdIntel.seniorityLevel: "senior"` → Stage 6 will flag a seniority mismatch
+- `allSkillsMentioned` has no `TypeScript`, `Redux`, `Zustand`, `AWS` — missing 4 of 7 must-haves
+
+---
+
+## Stage 4 — Chunking Output (`chunks[]`)
+
+**What happened:** The code walked every line of `cleanedResume`, used `"Work History"`, `"Career Summary"`, `"Core Competencies"`, `"Education"` as split markers (from Stage 3's `detectedHeaderRawText`), grouped lines into labeled sections, then split each section into ≤800-char chunks. No GPT-4o call — this is pure code.
+
+```/dev/null/stage4-output.json#L1-40
+[
+  {
+    "section": "summary",
+    "text": "Passionate frontend developer with experience building web apps using modern JavaScript frameworks."
+  },
+  {
+    "section": "experience",
+    "text": "Software Engineer at Acme Corp (2021 - present)\n- Built user interfaces using React and JavaScript\n- Worked with REST APIs\n- Helped team with code reviews"
+  },
+  {
+    "section": "experience",
+    "text": "Junior Developer at StartupXYZ (2019 - 2021)\n- Made websites using HTML and CSS\n- Did some React work"
+  },
+  {
+    "section": "skills",
+    "text": "React, JavaScript, HTML, CSS, Git, REST APIs"
+  },
+  {
+    "section": "education",
+    "text": "Bachelor of Science, Computer Science - State University, 2019"
+  }
+]
+```
+
+**Key things to note:**
+- Each chunk is **labeled with its section name** — this label is prepended as `[EXPERIENCE]`, `[SKILLS]` etc. when sent to HuggingFace for embedding in Stage 5
+- Two separate `experience` chunks because there were two jobs — each becomes its own vector point in Qdrant
+- The education chunk is tiny (1 line) — it will likely score low in semantic search since the JD doesn't talk much about education details
+
+---
+
+## Stage 5 — Semantic Scoring Output (`semanticScore` + `semanticGaps[]`)
+
+**What happened:** Each chunk was prefixed and embedded (e.g. `"[EXPERIENCE] Software Engineer at Acme Corp..."`), upserted into Qdrant, then the JD was embedded and searched. Qdrant returned cosine similarity scores per chunk, then the weighted average was computed.
+
+**Intermediate: What Qdrant search returned (the `searchResult` hits):**
+```/dev/null/stage5-qdrant-hits.json#L1-30
+[
+  { "score": 0.72, "payload": { "section": "experience", "text": "Software Engineer at Acme Corp..." } },
+  { "score": 0.68, "payload": { "section": "experience", "text": "Junior Developer at StartupXYZ..." } },
+  { "score": 0.58, "payload": { "section": "skills",     "text": "React, JavaScript, HTML, CSS..." } },
+  { "score": 0.45, "payload": { "section": "summary",    "text": "Passionate frontend developer..." } },
+  { "score": 0.41, "payload": { "section": "education",  "text": "Bachelor of Science..." } }
+]
+```
+
+**The weighted score calculation:**
+```/dev/null/stage5-calc.txt#L1-12
+Section weights: experience=2.0, skills=1.8, projects=1.5, education=1.0, summary=0.7
+
+experience chunk 1: 0.72 × 2.0 = 1.44
+experience chunk 2: 0.68 × 2.0 = 1.36
+skills chunk:       0.58 × 1.8 = 1.044
+summary chunk:      0.45 × 0.7 = 0.315
+education chunk:    0.41 × 1.0 = 0.41
+
+totalWeightedScore = 4.569
+totalWeight        = 8.5
+semanticScore      = round((4.569 / 8.5) * 100) = 54
+```
+
+**Final Stage 5 output:**
+```/dev/null/stage5-output.json#L1-12
+semanticScore: 54
+
+semanticGaps: [
+  {
+    "section": "skills",
+    "score": 58
+  }
+]
+```
+
+**Key things to note:**
+- `skills` average was `58` which is below the `< 60` gap threshold, so it gets flagged
+- `experience` average was `(72 + 68) / 2 = 70`, which is above the `< 65` threshold, so no gap there
+- `semanticScore: 54` — low because the resume talks about general React/JS work while the JD is specifically about TypeScript, Redux, AWS, and leadership which are semantically distant from Alex's resume vocabulary
+
+---
+
+## Stage 6 — Master Analysis Output (final `analysisResult`)
+
+**What happened:** GPT-4o received all 5 inputs — `cleanedResume`, JD text, `jdIntel` (Stage 2), `resumeMap` (Stage 3), `semanticGaps` (Stage 5) — and produced the full analysis. Then the worker merged in `semanticScore`, `semanticGaps`, `resumeFacts`, and `atsWarnings` from the earlier stages.
+
+```/dev/null/stage6-output.json#L1-130
+{
+  "overallScore": 41,
+  "scoreInterpretation": "weak",
+
+  "rubricBreakdown": {
+    "technicalSkills": {
+      "score": 18, "maxScore": 35,
+      "rationale": "React and JavaScript confirmed, but TypeScript, Redux/Zustand, and AWS are entirely absent — these are all required."
+    },
+    "yearsOfExperience": {
+      "score": 17, "maxScore": 25,
+      "rationale": "Resume shows ~5 years total YoE which meets the minimum, but roles are mid-level with no senior or lead experience evident."
+    },
+    "education": {
+      "score": 10, "maxScore": 10,
+      "rationale": "Bachelor's in Computer Science matches the requirement exactly."
+    },
+    "keywordCoverage": {
+      "score": 5, "maxScore": 15,
+      "rationale": "Only React and REST APIs from the must-have list are present. TypeScript, Redux, Zustand, AWS are all missing."
+    },
+    "softSkillsAndLeadership": {
+      "score": 1, "maxScore": 15,
+      "rationale": "Only 'helped with code reviews' is present. No mention of mentoring, team leadership, or technical interviews — all explicitly required."
+    }
+  },
+
+  "seniorityMismatch": {
+    "detected": true,
+    "resumeLevel": "mid",
+    "jdLevel": "senior",
+    "message": "Your resume reads as a mid-level individual contributor. The role requires demonstrated leadership of a team and architectural ownership — add explicit examples of both."
+  },
+
+  "keywordAnalysis": {
+    "matchedMustHave":   ["React", "REST APIs"],
+    "missingMustHave":   ["TypeScript", "Redux", "Zustand", "Node.js", "AWS"],
+    "matchedNiceToHave": [],
+    "missingNiceToHave": ["GraphQL", "Docker"],
+    "unexpectedStrengths": ["HTML", "CSS", "Git"]
+  },
+
+  "atsAnalysis": {
+    "overallAtsScore": 62,
+    "sectionFlags": [
+      { "section": "contact",  "status": "weak",    "severity": "info",     "advice": "Missing phone number. Add it for recruiter accessibility." },
+      { "section": "summary",  "status": "weak",    "severity": "warning",  "advice": "Summary is vague — 'passionate developer' adds no signal. Replace with specific tech stack and impact." },
+      { "section": "experience","status": "present", "severity": "info",    "advice": "Present but bullets lack quantified metrics. ATS ranks metric-backed bullets higher." },
+      { "section": "projects",  "status": "missing", "severity": "warning", "advice": "No projects section. Frontend engineers benefit greatly from showcasing side projects or OSS contributions." }
+    ],
+    "formattingFlags": [
+      "Non-standard section header 'Work History' detected — most ATS systems handle this fine, but 'Experience' is safer.",
+      "Non-standard section header 'Core Competencies' detected — consider renaming to 'Skills'."
+    ]
+  },
+
+  "bulletFeedback": [
+    {
+      "original": "Built user interfaces using React and JavaScript",
+      "issue": "Weak verb 'built', no metric, no business context",
+      "rewritten": "Engineered 12 reusable React component library modules, reducing UI development time by 30% across 4 product teams.",
+      "improvementType": "addMetric"
+    },
+    {
+      "original": "Helped team with code reviews",
+      "issue": "Passive verb 'helped', vague scope, no outcome",
+      "rewritten": "Led weekly code review sessions for a 5-engineer team, reducing post-deploy bug rate by 20% over 6 months.",
+      "improvementType": "actionVerb"
+    },
+    {
+      "original": "Made websites using HTML and CSS",
+      "issue": "Extremely weak — 'made websites' undersells the work, no stack depth",
+      "rewritten": "Developed responsive marketing sites in HTML/CSS achieving 95+ Lighthouse performance scores.",
+      "improvementType": "clarity"
+    }
+  ],
+
+  "grammarAndStyle": {
+    "issues": [
+      { "text": "Did some React work", "issue": "Vague and informal — 'some' is not professional", "suggestion": "Replace with a specific deliverable: 'Built React-based dashboard components for internal tooling.'" }
+    ],
+    "toneAssessment": "Generally professional but several bullets are informal and undersell the candidate's actual experience.",
+    "readabilityGrade": 8.2,
+    "usesFirstPerson": false,
+    "tenseConsistency": "mixed"
+  },
+
+  "semanticInsights": {
+    "strongestSections": ["experience"],
+    "weakestSections": ["skills", "summary"],
+    "meaningGaps": [
+      {
+        "area": "TypeScript & Type Safety",
+        "gap": "The JD heavily emphasizes TypeScript across the entire codebase. Your resume has zero TypeScript mentions — the semantic distance here is large.",
+        "suggestion": "If you have TypeScript exposure, add it explicitly to your skills and rewrite at least 2 bullets to mention it in context."
+      },
+      {
+        "area": "State Management",
+        "gap": "Redux/Zustand are required. Your skills section only lists React with no state management library.",
+        "suggestion": "Add Redux or Zustand to your skills section and reference a project where you managed complex application state."
+      },
+      {
+        "area": "Cloud / Infrastructure",
+        "gap": "AWS is a hard requirement. Your resume has no cloud, deployment, or infrastructure vocabulary at all.",
+        "suggestion": "Even basic S3/CloudFront or Amplify experience is worth adding if applicable."
+      }
+    ]
+  },
+
+  "topPriorityActions": [
+    { "priority": 1, "action": "Add TypeScript to skills and rewrite 2+ bullets to reference it explicitly — it is the single biggest gap vs a required skill.", "impact": "high", "effort": "low" },
+    { "priority": 2, "action": "Add a state management library (Redux or Zustand) with a concrete usage example — currently a required skill with zero coverage.", "impact": "high", "effort": "low" },
+    { "priority": 3, "action": "Rewrite all 5 experience bullets with strong action verbs and at least one metric each.", "impact": "high", "effort": "medium" },
+    { "priority": 4, "action": "Add a leadership statement — e.g. mentoring a junior, owning a feature end-to-end, or driving a technical decision.", "impact": "high", "effort": "medium" },
+    { "priority": 5, "action": "Add any AWS exposure (even S3 or Amplify) or acknowledge the gap directly in a cover letter.", "impact": "medium", "effort": "high" }
+  ],
+
+  "summaryVerdict": "Alex has the foundational React experience the role requires, but the resume currently reads as a mid-level individual contributor applying for a senior leadership position. Three critical required skills (TypeScript, AWS, Redux/Zustand) are completely absent, and there is no evidence of the team leadership the JD explicitly demands. With targeted rewrites and honest additions, this score could realistically reach 65-70.",
+
+  "semanticScore": 54,
+  "semanticGaps": [
+    { "section": "skills", "score": 58 }
+  ],
+  "resumeFacts": { "...all of extractedFacts from Stage 3..." },
+  "atsWarnings": [ "...all of atsWarnings from Stage 3..." ]
+}
+```
+
+---
+
+## The Full Data Flow at a Glance
+
+```/dev/null/data-flow.txt#L1-20
+RAW PDF TEXT
+    │
+    ▼
+STAGE 1 ──► cleanedResume (string)
+    │
+    ├──► STAGE 2 ──► jdIntel       { mustHaveSkills, rubricWeights, seniorityLevel... }
+    │                    │
+    ├──► STAGE 3 ──► resumeMap     { sections{detectedHeaderRawText}, extractedFacts, atsWarnings }
+    │                    │
+    │    STAGE 4 ◄────────         chunks[]  { section, text }[]   (no GPT call)
+    │        │
+    ├──► STAGE 5 ◄── chunks[]  ──► semanticScore (54) + semanticGaps ([{skills, 58}])
+    │
+    └──► STAGE 6 ◄── cleanedResume + JD + jdIntel + resumeMap + semanticGaps
+             │
+             ▼
+        analysisResult  (the full object above — saved to MongoDB, sent to frontend)
+```
+
+The key insight from this demo: **Alex scores 41/100 overall** — education is the only perfect score (10/10). The keyword and leadership gaps from Stage 2 vs Stage 3 comparisons, combined with the semantic distance flagged in Stage 5, all converge on the same conclusion in Stage 6.
+
+## User
+
+if section 4 uses detectedHeaderRawText   so what is the meaning of  detectedHeaderName
+
+## Assistant
+
+Great question. Let me look at exactly where each field is used across the entire codebase.
+
+**Tool Call: Search files for regex `detectedHeaderName`**
+Status: Completed
+
+Found 1 matches:
+
+## Matches in resume-analyzer_upgraded\backend\lib\prompts.ts
+
+### const RESUME_MAP_USER_PROMPT › L56-69
+```
+export const RESUME_MAP_USER_PROMPT = `Parse this resume and return the following JSON:
+
+{
+  "sections": {
+    "contactInfo":     { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null, "hasEmail": boolean, "hasPhone": boolean, "hasLinkedIn": boolean, "hasLocation": boolean },
+    "summary":         { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "experience":      { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "education":       { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "skills":          { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "projects":        { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "certifications":  { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "achievements":    { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null }
+  },
+  "extractedFacts": {
+```
+
+31 lines remaining in ancestor node. Read the file to see all.
+
+
+**Tool Call: Search files for regex `detectedHeaderRawText`**
+Status: Completed
+
+Found 2 matches:
+
+## Matches in resume-analyzer_upgraded\backend\lib\prompts.ts
+
+### const RESUME_MAP_USER_PROMPT › L56-69
+```
+export const RESUME_MAP_USER_PROMPT = `Parse this resume and return the following JSON:
+
+{
+  "sections": {
+    "contactInfo":     { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null, "hasEmail": boolean, "hasPhone": boolean, "hasLinkedIn": boolean, "hasLocation": boolean },
+    "summary":         { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "experience":      { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "education":       { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "skills":          { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "projects":        { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "certifications":  { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null },
+    "achievements":    { "present": boolean, "detectedHeaderName": string | null, "detectedHeaderRawText": string | null }
+  },
+  "extractedFacts": {
+```
+
+31 lines remaining in ancestor node. Read the file to see all.
+
+## Matches in resume-analyzer_upgraded\backend\worker.ts
+
+### const worker › L101-107
+```
+      for (const [key, val] of Object.entries(resumeMap.sections)) {
+        const sectionData = val as any;
+        if (sectionData.present && sectionData.detectedHeaderRawText) {
+          rawHeaders.push({
+            key,
+            normalized: sectionData.detectedHeaderRawText.toLowerCase().replace(/\s+/g, ' ').trim()
+          });
+```
+
+2 lines remaining in ancestor node. Read the file to see all.
+
+
+## Assistant
+
+That's the complete answer right there. `detectedHeaderName` appears in **exactly one place** — the prompt schema definition. It is **never read anywhere in the worker code**.
+
+---
+
+## The Honest Answer: `detectedHeaderName` is currently dead weight
+
+Here's the comparison side by side:
+
+| Field | Defined in prompt? | Read in worker code? | Used by any stage? |
+|---|---|---|---|
+| `detectedHeaderRawText` | ✅ Yes | ✅ Yes — Stage 4 | ✅ Stage 4 |
+| `detectedHeaderName` | ✅ Yes | ❌ Never | ❌ Nothing |
+
+The only place `detectedHeaderRawText` is consumed:
+
+```resume-analyzer_upgraded/backend/worker.ts#L101-107
+      for (const [key, val] of Object.entries(resumeMap.sections)) {
+        const sectionData = val as any;
+        if (sectionData.present && sectionData.detectedHeaderRawText) {
+          rawHeaders.push({
+            key,
+            normalized: sectionData.detectedHeaderRawText.toLowerCase().replace(/\s+/g, ' ').trim()
+          });
+```
+
+`detectedHeaderName` is never touched anywhere.
+
+---
+
+## What it *was probably intended for*
+
+Looking at the naming convention, the two fields were clearly designed to be different things:
+
+```/dev/null/intent.txt#L1-8
+detectedHeaderName    → the CANONICAL name GPT-4o gave it
+                         e.g.  "Professional Experience" → "experience"
+                               "Core Competencies"       → "skills"
+
+detectedHeaderRawText → the EXACT text as typed in the PDF
+                         e.g.  "Professional Experience" → "Professional Experience"
+                               "Core Competencies"       → "Core Competencies"
+```
+
+So `detectedHeaderName` was likely intended as a **human-readable label** to display in the UI — for example, showing *"We detected your Skills section as 'Core Competencies'"* in the results. But that feature was never built, so the field gets asked of GPT-4o, GPT-4o dutifully returns it, and then the code completely ignores it.
+
+It's also slightly redundant by design — because the **JSON key itself** (`"skills"`, `"experience"`) already *is* the canonical name. So `detectedHeaderName` would just echo back something like `"skills"` for the `skills` key, making it doubly pointless in its current form.
