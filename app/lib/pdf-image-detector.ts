@@ -2,6 +2,8 @@
 // Detects embedded images in PDF files using pdfjs-dist v5 (Node.js legacy build).
 // Used to warn users about photos/images that ATS systems cannot parse.
 
+import path from 'path';
+
 /**
  * Count the number of embedded images in a PDF buffer.
  * @param buffer The PDF file as a Buffer
@@ -24,9 +26,20 @@ export async function countImagesInPDF(buffer: Buffer): Promise<number> {
   // Dynamic import so polyfills are applied before pdfjs initialises.
   const { getDocument, GlobalWorkerOptions, OPS } = await import('pdfjs-dist/legacy/build/pdf.mjs');
 
-  // Disable the web worker — Next.js serverless functions don't support worker
-  // threads, so this prevents the "Cannot find module pdf.worker.mjs" error.
-  GlobalWorkerOptions.workerSrc = '';
+  // pdfjs-dist v5 requires a non-empty workerSrc (empty string is treated as
+  // "not set" and throws). Point it at the worker file on disk so Node.js can
+  // spin it up via worker_threads. process.cwd() is the project root both
+  // locally and on Vercel (/var/task).
+  const workerAbsPath = path.join(
+    process.cwd(),
+    'node_modules',
+    'pdfjs-dist',
+    'legacy',
+    'build',
+    'pdf.worker.mjs'
+  );
+  // Always use forward slashes and the file:// scheme so pdfjs can load it
+  GlobalWorkerOptions.workerSrc = `file://${workerAbsPath.replace(/\\/g, '/')}`;
 
   const data = new Uint8Array(buffer);
 
@@ -37,7 +50,7 @@ export async function countImagesInPDF(buffer: Buffer): Promise<number> {
 
   const shouldFilter = (...args: unknown[]) => {
     const msg = String(args[0] ?? '');
-    return msg.includes('fontRes') || msg.includes('TT:');
+    return msg.includes('fontRes') || msg.includes('TT:') || msg.includes('@napi-rs');
   };
 
   console.log = (...args: unknown[]) => {
@@ -48,10 +61,7 @@ export async function countImagesInPDF(buffer: Buffer): Promise<number> {
   };
 
   try {
-    const loadingTask = getDocument({
-      data,
-      disableFontFace: true,
-    });
+    const loadingTask = getDocument({ data, disableFontFace: true });
     const pdf = await loadingTask.promise;
     let imageCount = 0;
 
